@@ -1,0 +1,18 @@
+{
+  "name": "safe-track-server",
+  "version": "1.0.0",
+  "description": "Safe Track 실시간 위치 공유 서버",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "bcrypt": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
