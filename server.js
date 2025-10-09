@@ -66,6 +66,15 @@ io.on('connection', (socket) => {
   socket.on('reconnect', (data) => {
     const { userId } = data;
     if (registeredUsers.has(userId)) {
+      // 기존 세션 정리
+      for (const [existingUserId, userData] of users.entries()) {
+        if (existingUserId === userId) {
+          users.delete(existingUserId);
+          break;
+        }
+      }
+      
+      // 새 세션 생성
       users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
       socket.userId = userId;
       
@@ -79,6 +88,7 @@ io.on('connection', (socket) => {
         };
       });
       io.emit('userList', updatedUsers);
+      socket.emit('userList', updatedUsers);
     }
   });
 
@@ -140,11 +150,21 @@ io.on('connection', (socket) => {
       return;
     }
     
+    // 기존 세션 정리
+    for (const [existingUserId, userData] of users.entries()) {
+      if (existingUserId === userId) {
+        users.delete(existingUserId);
+        break;
+      }
+    }
+    
+    // 새 세션 생성
     users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
     socket.userId = userId;
     
     socket.emit('loginSuccess', { userId });
     
+    // 즉시 온라인 상태 업데이트
     const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
       const onlineUser = users.get(uid);
       return {
@@ -155,6 +175,9 @@ io.on('connection', (socket) => {
       };
     });
     io.emit('userList', updatedUsers);
+    
+    // 로그인한 사용자에게도 즉시 사용자 목록 전송
+    socket.emit('userList', updatedUsers);
   });
 
   socket.on('startTracking', (data) => {
@@ -294,6 +317,13 @@ io.on('connection', (socket) => {
       }
     }
     
+    // 요청자의 위치 추적 중단
+    if (users.has(fromUserId)) {
+      users.get(fromUserId).isTracking = false;
+      locations.delete(fromUserId);
+      io.emit('trackingStatusUpdate', { userId: fromUserId, isTracking: false });
+    }
+    
     const targetUser = users.get(targetUserId);
     if (targetUser) {
       io.to(targetUser.socketId).emit('locationShareStopped', {
@@ -302,6 +332,53 @@ io.on('connection', (socket) => {
       });
       io.to(targetUser.socketId).emit('locationRemoved', {
         userId: fromUserId
+      });
+    }
+  });
+
+  socket.on('stopReceivingShare', (data) => {
+    const { fromUserId } = data;
+    const toUserId = socket.userId;
+    
+    // fromUserId의 권한에서 toUserId 제거
+    if (sharePermissions.has(fromUserId)) {
+      sharePermissions.get(fromUserId).delete(toUserId);
+      if (sharePermissions.get(fromUserId).size === 0) {
+        sharePermissions.delete(fromUserId);
+      }
+    }
+    
+    // 요청자의 위치 추적 중단
+    if (users.has(fromUserId)) {
+      users.get(fromUserId).isTracking = false;
+      locations.delete(fromUserId);
+      io.emit('trackingStatusUpdate', { userId: fromUserId, isTracking: false });
+    }
+    
+    // fromUserId에게 공유 중지 알림
+    const fromUser = users.get(fromUserId);
+    if (fromUser) {
+      io.to(fromUser.socketId).emit('locationShareStopped', {
+        fromUserId: toUserId,
+        fromName: users.get(toUserId).name
+      });
+    }
+  });
+
+  socket.on('requestCurrentLocation', (data) => {
+    const { targetUserId } = data;
+    const requesterId = socket.userId;
+    
+    const targetLocation = locations.get(targetUserId);
+    const targetHistory = locationHistory.get(targetUserId);
+    
+    if (targetLocation && targetHistory) {
+      socket.emit('locationReceived', {
+        userId: targetUserId,
+        lat: targetLocation.lat,
+        lng: targetLocation.lng,
+        timestamp: targetLocation.timestamp,
+        path: targetHistory.map(h => [h.lat, h.lng])
       });
     }
   });
@@ -335,25 +412,50 @@ io.on('connection', (socket) => {
     socket.emit('messageSent', messageData);
   });
 
+  socket.on('logout', (data) => {
+    const { userId } = data;
+    const user = users.get(userId);
+    
+    if (user) {
+      user.isTracking = false;
+      locations.delete(userId);
+      users.delete(userId);
+      
+      const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
+        const onlineUser = users.get(uid);
+        return {
+          id: uid,
+          name: uid,
+          isOnline: !!onlineUser,
+          isTracking: onlineUser ? onlineUser.isTracking : false
+        };
+      });
+      io.emit('userList', updatedUsers);
+    }
+  });
+
   socket.on('disconnect', () => {
     if (socket.userId) {
       const user = users.get(socket.userId);
-      if (user) {
+      if (user && user.socketId === socket.id) {
         user.isTracking = false;
         locations.delete(socket.userId);
         users.delete(socket.userId);
         io.emit('trackingStatusUpdate', { userId: socket.userId, isTracking: false });
         
-        const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-          const onlineUser = users.get(uid);
-          return {
-            id: uid,
-            name: uid,
-            isOnline: !!onlineUser,
-            isTracking: onlineUser ? onlineUser.isTracking : false
-          };
-        });
-        io.emit('userList', updatedUsers);
+        // 지연된 사용자 목록 업데이트 (재연결 시간 고려)
+        setTimeout(() => {
+          const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
+            const onlineUser = users.get(uid);
+            return {
+              id: uid,
+              name: uid,
+              isOnline: !!onlineUser,
+              isTracking: onlineUser ? onlineUser.isTracking : false
+            };
+          });
+          io.emit('userList', updatedUsers);
+        }, 1000);
       }
     }
   });
