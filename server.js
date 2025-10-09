@@ -9,7 +9,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: ["https://safe-track-client.vercel.app", "http://localhost:3001"],
     methods: ["GET", "POST"]
   }
 });
