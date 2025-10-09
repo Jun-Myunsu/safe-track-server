@@ -50,7 +50,7 @@ const shareRequests = new Map();
 const sharePermissions = new Map();
 
 io.on('connection', (socket) => {
-  console.log('사용자 연결:', socket.id);
+  console.log('사용자 연결:', socket.id, '| IP:', socket.handshake.address, '| User-Agent:', socket.handshake.headers['user-agent']);
   
   const allUsers = Array.from(registeredUsers.keys()).map(userId => {
     const onlineUser = users.get(userId);
