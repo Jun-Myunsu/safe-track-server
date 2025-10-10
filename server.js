@@ -1,9 +1,9 @@
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const bcrypt = require('bcrypt');
-const fs = require('fs');
-const path = require('path');
+const { initDatabase, createUser, getUser, searchUsers, userExists, addFriend, getFriends, removeFriend, createSession, getSession, updateSession, deleteSession, cleanExpiredSessions } = require('./database');
 
 const app = express();
 const server = http.createServer(app);
@@ -14,35 +14,13 @@ const io = socketIo(server, {
   }
 });
 
-// JSON 파일 경로
-const USERS_FILE = path.join(__dirname, 'users.json');
+// 데이터베이스 초기화
+initDatabase();
 
-// JSON 파일에서 사용자 데이터 로드
-function loadUsers() {
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      const data = fs.readFileSync(USERS_FILE, 'utf8');
-      const usersArray = JSON.parse(data);
-      return new Map(usersArray);
-    }
-  } catch (error) {
-    console.error('사용자 데이터 로드 실패:', error);
-  }
-  return new Map();
-}
+// 만료된 세션 정리 (1시간마다)
+setInterval(cleanExpiredSessions, 60 * 60 * 1000);
 
-// JSON 파일에 사용자 데이터 저장
-function saveUsers() {
-  try {
-    const usersArray = Array.from(registeredUsers.entries());
-    fs.writeFileSync(USERS_FILE, JSON.stringify(usersArray, null, 2));
-  } catch (error) {
-    console.error('사용자 데이터 저장 실패:', error);
-  }
-}
-
-// 메모리 저장소
-const registeredUsers = loadUsers();
+// 메모리 저장소 (세션 데이터용)
 const users = new Map();
 const locations = new Map();
 const locationHistory = new Map();
@@ -52,20 +30,46 @@ const sharePermissions = new Map();
 io.on('connection', (socket) => {
   console.log('사용자 연결:', socket.id, '| IP:', socket.handshake.address, '| User-Agent:', socket.handshake.headers['user-agent']);
   
-  const allUsers = Array.from(registeredUsers.keys()).map(userId => {
-    const onlineUser = users.get(userId);
-    return {
-      id: userId,
-      name: userId,
-      isOnline: !!onlineUser,
-      isTracking: onlineUser ? onlineUser.isTracking : false
-    };
-  });
-  socket.emit('userList', allUsers);
+  // 온라인 사용자 목록만 전송
+  const onlineUsers = Array.from(users.entries()).map(([userId, userData]) => ({
+    id: userId,
+    name: userId,
+    isOnline: true,
+    isTracking: userData.isTracking
+  }));
+  socket.emit('userList', onlineUsers);
 
-  socket.on('reconnect', (data) => {
+  socket.on('validateSession', async (data) => {
+    const { sessionId } = data;
+    const session = await getSession(sessionId);
+    
+    if (session) {
+      const userId = session.user_id;
+      users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
+      socket.userId = userId;
+      socket.sessionId = sessionId;
+      
+      // 소켓 ID 업데이트
+      await updateSession(sessionId, socket.id);
+      
+      socket.emit('sessionValid', { userId });
+      
+      const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+        id: uid,
+        name: uid,
+        isOnline: true,
+        isTracking: userData.isTracking
+      }));
+      io.emit('userList', updatedUsers);
+    } else {
+      socket.emit('sessionInvalid');
+    }
+  });
+
+  socket.on('reconnect', async (data) => {
     const { userId } = data;
-    if (registeredUsers.has(userId)) {
+    const userExists = await getUser(userId);
+    if (userExists) {
       // 기존 세션 정리
       for (const [existingUserId, userData] of users.entries()) {
         if (existingUserId === userId) {
@@ -78,27 +82,23 @@ io.on('connection', (socket) => {
       users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
       socket.userId = userId;
       
-      const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-        const onlineUser = users.get(uid);
-        return {
-          id: uid,
-          name: uid,
-          isOnline: !!onlineUser,
-          isTracking: onlineUser ? onlineUser.isTracking : false
-        };
-      });
+      const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+        id: uid,
+        name: uid,
+        isOnline: true,
+        isTracking: userData.isTracking
+      }));
       io.emit('userList', updatedUsers);
-      socket.emit('userList', updatedUsers);
     }
   });
 
-  socket.on('checkUserId', (data) => {
+  socket.on('checkUserId', async (data) => {
     const { userId } = data;
-    const isAvailable = !registeredUsers.has(userId);
-    socket.emit('userIdCheckResult', { userId, isAvailable });
+    const exists = await userExists(userId);
+    socket.emit('userIdCheckResult', { userId, isAvailable: !exists });
   });
 
-  socket.on('register', (userData) => {
+  socket.on('register', async (userData) => {
     const { userId, password } = userData;
     
     if (!userId || !password) {
@@ -106,32 +106,37 @@ io.on('connection', (socket) => {
       return;
     }
     
-    if (registeredUsers.has(userId)) {
+    const exists = await userExists(userId);
+    if (exists) {
       socket.emit('registerError', { message: '이미 사용 중인 아이디입니다' });
       return;
     }
     
-    const hashedPassword = bcrypt.hashSync(password, 10);
-    registeredUsers.set(userId, { password: hashedPassword, createdAt: new Date() });
-    saveUsers();
+    const success = await createUser(userId, password);
+    if (!success) {
+      socket.emit('registerError', { message: '회원가입 중 오류가 발생했습니다' });
+      return;
+    }
+    
     users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
     socket.userId = userId;
     
-    socket.emit('registerSuccess', { userId });
+    // 세션 생성
+    const sessionId = await createSession(userId, socket.id);
+    socket.sessionId = sessionId;
     
-    const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-      const onlineUser = users.get(uid);
-      return {
-        id: uid,
-        name: uid,
-        isOnline: !!onlineUser,
-        isTracking: onlineUser ? onlineUser.isTracking : false
-      };
-    });
+    socket.emit('registerSuccess', { userId, sessionId });
+    
+    const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+      id: uid,
+      name: uid,
+      isOnline: true,
+      isTracking: userData.isTracking
+    }));
     io.emit('userList', updatedUsers);
   });
   
-  socket.on('login', (userData) => {
+  socket.on('login', async (userData) => {
     const { userId, password } = userData;
     
     if (!userId || !password) {
@@ -139,13 +144,14 @@ io.on('connection', (socket) => {
       return;
     }
     
-    if (!registeredUsers.has(userId)) {
+    const user = await getUser(userId);
+    if (!user) {
       socket.emit('loginError', { message: '존재하지 않는 사용자입니다' });
       return;
     }
     
-    const user = registeredUsers.get(userId);
-    if (!bcrypt.compareSync(password, user.password)) {
+    const passwordMatch = await bcrypt.compare(password, user.password);
+    if (!passwordMatch) {
       socket.emit('loginError', { message: '비밀번호가 일치하지 않습니다' });
       return;
     }
@@ -162,22 +168,20 @@ io.on('connection', (socket) => {
     users.set(userId, { name: userId, socketId: socket.id, isTracking: false });
     socket.userId = userId;
     
-    socket.emit('loginSuccess', { userId });
+    // 세션 생성
+    const sessionId = await createSession(userId, socket.id);
+    socket.sessionId = sessionId;
     
-    // 즉시 온라인 상태 업데이트
-    const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-      const onlineUser = users.get(uid);
-      return {
-        id: uid,
-        name: uid,
-        isOnline: !!onlineUser,
-        isTracking: onlineUser ? onlineUser.isTracking : false
-      };
-    });
+    socket.emit('loginSuccess', { userId, sessionId });
+    
+    // 온라인 사용자 목록 업데이트
+    const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+      id: uid,
+      name: uid,
+      isOnline: true,
+      isTracking: userData.isTracking
+    }));
     io.emit('userList', updatedUsers);
-    
-    // 로그인한 사용자에게도 즉시 사용자 목록 전송
-    socket.emit('userList', updatedUsers);
   });
 
   socket.on('startTracking', (data) => {
@@ -230,11 +234,12 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('requestLocationShare', (data) => {
+  socket.on('requestLocationShare', async (data) => {
     const { targetUserId } = data;
     const fromUserId = socket.userId;
     
-    if (!registeredUsers.has(targetUserId)) {
+    const targetExists = await userExists(targetUserId);
+    if (!targetExists) {
       socket.emit('shareRequestError', { message: '존재하지 않는 사용자입니다' });
       return;
     }
@@ -383,6 +388,70 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('searchUsers', async (data) => {
+    const { query } = data;
+    const searchResults = await searchUsers(query);
+    
+    // 온라인 상태 업데이트
+    const resultsWithStatus = searchResults.map(user => {
+      const onlineUser = users.get(user.id);
+      return {
+        ...user,
+        isOnline: !!onlineUser,
+        isTracking: onlineUser ? onlineUser.isTracking : false
+      };
+    });
+    
+    socket.emit('searchResults', { users: resultsWithStatus });
+  });
+
+  socket.on('addFriend', async (data) => {
+    const { targetUserId } = data;
+    const fromUserId = socket.userId;
+    
+    const targetExists = await userExists(targetUserId);
+    if (!targetExists) {
+      socket.emit('friendAddError', { message: '존재하지 않는 사용자입니다' });
+      return;
+    }
+    
+    const success = await addFriend(fromUserId, targetUserId);
+    if (success) {
+      socket.emit('friendAdded', { friendId: targetUserId });
+    } else {
+      socket.emit('friendAddError', { message: '친구 추가 중 오류가 발생했습니다' });
+    }
+  });
+
+  socket.on('getFriends', async (data) => {
+    const userId = socket.userId;
+    const friends = await getFriends(userId);
+    
+    // 온라인 상태 업데이트
+    const friendsWithStatus = friends.map(friend => {
+      const onlineUser = users.get(friend.id);
+      return {
+        ...friend,
+        isOnline: !!onlineUser,
+        isTracking: onlineUser ? onlineUser.isTracking : false
+      };
+    });
+    
+    socket.emit('friendsList', { friends: friendsWithStatus });
+  });
+
+  socket.on('removeFriend', async (data) => {
+    const { friendId } = data;
+    const userId = socket.userId;
+    
+    const success = await removeFriend(userId, friendId);
+    if (success) {
+      socket.emit('friendRemoved', { friendId });
+    } else {
+      socket.emit('friendRemoveError', { message: '친구 삭제 중 오류가 발생했습니다' });
+    }
+  });
+
   socket.on('sendMessage', (data) => {
     const { targetUserId, message } = data;
     const fromUserId = socket.userId;
@@ -412,7 +481,7 @@ io.on('connection', (socket) => {
     socket.emit('messageSent', messageData);
   });
 
-  socket.on('logout', (data) => {
+  socket.on('logout', async (data) => {
     const { userId } = data;
     const user = users.get(userId);
     
@@ -421,15 +490,17 @@ io.on('connection', (socket) => {
       locations.delete(userId);
       users.delete(userId);
       
-      const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-        const onlineUser = users.get(uid);
-        return {
-          id: uid,
-          name: uid,
-          isOnline: !!onlineUser,
-          isTracking: onlineUser ? onlineUser.isTracking : false
-        };
-      });
+      // 세션 삭제
+      if (socket.sessionId) {
+        await deleteSession(socket.sessionId);
+      }
+      
+      const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+        id: uid,
+        name: uid,
+        isOnline: true,
+        isTracking: userData.isTracking
+      }));
       io.emit('userList', updatedUsers);
     }
   });
@@ -445,15 +516,12 @@ io.on('connection', (socket) => {
         
         // 지연된 사용자 목록 업데이트 (재연결 시간 고려)
         setTimeout(() => {
-          const updatedUsers = Array.from(registeredUsers.keys()).map(uid => {
-            const onlineUser = users.get(uid);
-            return {
-              id: uid,
-              name: uid,
-              isOnline: !!onlineUser,
-              isTracking: onlineUser ? onlineUser.isTracking : false
-            };
-          });
+          const updatedUsers = Array.from(users.entries()).map(([uid, userData]) => ({
+            id: uid,
+            name: uid,
+            isOnline: true,
+            isTracking: userData.isTracking
+          }));
           io.emit('userList', updatedUsers);
         }, 1000);
       }
