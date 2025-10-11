@@ -2,7 +2,7 @@
   "name": "safe-track-server",
   "version": "1.0.0",
   "description": "Safe Track 실시간 위치 공유 서버",
-  "main": "server.js",
+  "main": "src/index.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
