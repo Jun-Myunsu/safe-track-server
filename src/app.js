@@ -24,10 +24,24 @@ class SafeTrackServer {
     this.server = http.createServer(this.app);
     this.io = socketIo(this.server, { cors: config.cors });
     
+    this.setupRoutes();
     this.initServices();
     this.initControllers();
     this.setupSocketHandlers();
     this.startCleanupTasks();
+    this.startKeepAlive();
+  }
+
+  setupRoutes() {
+    // Keep-alive 엔드포인트
+    this.app.get('/ping', (req, res) => {
+      res.json({ 
+        status: 'alive', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime(),
+        onlineUsers: this.userService ? this.userService.getOnlineUserCount() : 0
+      });
+    });
   }
 
   initServices() {
@@ -76,6 +90,11 @@ class SafeTrackServer {
       // Chat events
       socket.on('sendMessage', (data) => this.chatController.handleSendMessage(socket, data));
 
+      // Keep-alive
+      socket.on('ping', () => {
+        socket.emit('pong', { timestamp: new Date().toISOString() });
+      });
+
       // Disconnect
       socket.on('disconnect', () => this.handleDisconnect(socket));
     });
@@ -102,6 +121,23 @@ class SafeTrackServer {
     setInterval(() => {
       Session.cleanExpired();
     }, config.session.cleanupInterval);
+  }
+
+  startKeepAlive() {
+    // 자체 ping으로 sleep 방지 (5분마다)
+    if (process.env.NODE_ENV === 'production') {
+      const serverUrl = process.env.RENDER_EXTERNAL_URL || 'https://safe-track-server.onrender.com';
+      
+      setInterval(async () => {
+        try {
+          const response = await fetch(`${serverUrl}/ping`);
+          const data = await response.json();
+          console.log('Keep-alive ping:', data.status, '| Users:', data.onlineUsers);
+        } catch (error) {
+          console.log('Keep-alive ping failed:', error.message);
+        }
+      }, 5 * 60 * 1000); // 5분마다
+    }
   }
 
   async start() {

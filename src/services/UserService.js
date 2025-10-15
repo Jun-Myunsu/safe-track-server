@@ -31,6 +31,10 @@ class UserService {
     }));
   }
 
+  getOnlineUserCount() {
+    return this.onlineUsers.size;
+  }
+
   setUserTracking(userId, isTracking) {
     const user = this.onlineUsers.get(userId);
     if (user) {
