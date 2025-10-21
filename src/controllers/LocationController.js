@@ -47,13 +47,13 @@ class LocationController {
       
       const targetExists = await User.exists(targetUserId);
       if (!targetExists) {
-        socket.emit('shareRequestError', { message: '존재하지 않는 사용자입니다' });
+        socket.emit('shareRequestError', { message: '존재하지 않는 사용자입니다', targetUserId });
         return;
       }
       
       const targetUser = this.userService.getOnlineUser(targetUserId);
       if (!targetUser) {
-        socket.emit('shareRequestError', { message: '해당 사용자가 현재 오프라인입니다' });
+        socket.emit('shareRequestError', { message: '해당 사용자가 현재 오프라인입니다', targetUserId });
         return;
       }
       
@@ -67,7 +67,7 @@ class LocationController {
       
       socket.emit('shareRequestSent', { targetUserId, targetName: targetUserId });
     } catch (error) {
-      socket.emit('shareRequestError', { message: '요청 처리 중 오류가 발생했습니다' });
+      socket.emit('shareRequestError', { message: '요청 처리 중 오류가 발생했습니다', targetUserId: data.targetUserId });
     }
   }
 
