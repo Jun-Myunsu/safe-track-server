@@ -7,6 +7,14 @@ class AuthService {
       throw new Error('아이디와 비밀번호를 입력하세요');
     }
 
+    if (userId.length < 4) {
+      throw new Error('아이디는 4자리 이상 입력하세요');
+    }
+
+    if (password.length < 4) {
+      throw new Error('비밀번호는 4자리 이상 입력하세요');
+    }
+
     const exists = await User.exists(userId);
     if (exists) {
       throw new Error('이미 사용 중인 아이디입니다');
@@ -23,6 +31,14 @@ class AuthService {
   static async login(userId, password) {
     if (!userId || !password) {
       throw new Error('아이디와 비밀번호를 입력하세요');
+    }
+
+    if (userId.length < 4) {
+      throw new Error('아이디는 4자리 이상이어야 합니다');
+    }
+
+    if (password.length < 4) {
+      throw new Error('비밀번호는 4자리 이상이어야 합니다');
     }
 
     const user = await User.findById(userId);
