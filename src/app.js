@@ -63,6 +63,16 @@ class SafeTrackServer {
         onlineUsers: this.userService ? this.userService.getOnlineUserCount() : 0
       });
     });
+
+    this.app.post('/api/emergency-tip', async (_req, res) => {
+      try {
+        const tip = await this.aiChatService.generateEmergencyTip();
+        res.json(tip);
+      } catch (error) {
+        console.error('응급 상식 생성 실패:', error);
+        res.status(500).json({ error: '응급 상식을 불러올 수 없습니다' });
+      }
+    });
   }
 
   /**
