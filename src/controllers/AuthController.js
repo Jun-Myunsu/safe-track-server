@@ -51,6 +51,18 @@ class AuthController {
 
       if (session) {
         const userId = session.user_id;
+        
+        // 중복 로그인 방지
+        const existingUser = this.userService.getOnlineUser(userId);
+        if (existingUser && existingUser.socketId !== socket.id) {
+          const existingSocket = this.io.sockets.sockets.get(existingUser.socketId);
+          if (existingSocket) {
+            existingSocket.emit('forceLogout', { reason: '다른 기기에서 로그인되었습니다' });
+            setTimeout(() => existingSocket.disconnect(true), 100);
+          }
+        }
+        
+        this.userService.removeOnlineUser(userId);
         this.userService.addOnlineUser(userId, socket.id);
         socket.userId = userId;
         socket.sessionId = sessionId;
@@ -60,7 +72,6 @@ class AuthController {
         socket.emit('sessionValid', { userId });
         this.io.emit('userList', this.userService.getAllOnlineUsers());
 
-        // 공유 상태 복원
         this.restoreShareState(socket, userId);
       } else {
         socket.emit('sessionInvalid');
@@ -76,6 +87,17 @@ class AuthController {
 
       await AuthService.register(userId, password);
 
+      // 중복 로그인 방지
+      const existingUser = this.userService.getOnlineUser(userId);
+      if (existingUser && existingUser.socketId !== socket.id) {
+        const existingSocket = this.io.sockets.sockets.get(existingUser.socketId);
+        if (existingSocket) {
+          existingSocket.emit('forceLogout', { reason: '다른 기기에서 로그인되었습니다' });
+          setTimeout(() => existingSocket.disconnect(true), 100);
+        }
+      }
+
+      this.userService.removeOnlineUser(userId);
       this.userService.addOnlineUser(userId, socket.id);
       socket.userId = userId;
 
@@ -95,9 +117,18 @@ class AuthController {
 
       await AuthService.login(userId, password);
 
-      // 기존 세션 정리
-      this.userService.removeOnlineUser(userId);
+      // 중복 로그인 방지
+      const existingUser = this.userService.getOnlineUser(userId);
+      if (existingUser && existingUser.socketId !== socket.id) {
+        const existingSocket = this.io.sockets.sockets.get(existingUser.socketId);
+        if (existingSocket) {
+          existingSocket.emit('forceLogout', { reason: '다른 기기에서 로그인되었습니다' });
+          setTimeout(() => existingSocket.disconnect(true), 100);
+        }
+        await AuthService.deleteSessionByUserId(userId);
+      }
 
+      this.userService.removeOnlineUser(userId);
       this.userService.addOnlineUser(userId, socket.id);
       socket.userId = userId;
 
@@ -107,7 +138,6 @@ class AuthController {
       socket.emit('loginSuccess', { userId, sessionId });
       this.io.emit('userList', this.userService.getAllOnlineUsers());
 
-      // 공유 상태 복원
       this.restoreShareState(socket, userId);
     } catch (error) {
       socket.emit('loginError', { message: error.message });

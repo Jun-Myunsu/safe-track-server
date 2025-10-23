@@ -69,6 +69,10 @@ class AuthService {
   static async deleteSession(sessionId) {
     return Session.delete(sessionId);
   }
+
+  static async deleteSessionByUserId(userId) {
+    return Session.deleteByUserId(userId);
+  }
 }
 
 module.exports = AuthService;

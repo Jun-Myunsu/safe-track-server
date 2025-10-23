@@ -1,5 +1,6 @@
 const express = require('express');
 const config = require('../config/server');
+const { apiLimiter } = require('./rateLimiter');
 
 /**
  * Express 애플리케이션 미들웨어 설정
@@ -20,6 +21,9 @@ function configureExpressMiddleware(app) {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     next();
   });
+
+  // Rate limiting
+  app.use('/api/', apiLimiter);
 
   // 요청 로깅 (개발 환경)
   if (process.env.NODE_ENV !== 'production') {

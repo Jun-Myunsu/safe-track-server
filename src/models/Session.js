@@ -52,6 +52,16 @@ class Session {
     }
   }
 
+  static async deleteByUserId(userId) {
+    try {
+      await pool.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+      return true;
+    } catch (error) {
+      console.error('사용자 세션 삭제 실패:', error);
+      return false;
+    }
+  }
+
   static async cleanExpired() {
     try {
       await pool.query('DELETE FROM sessions WHERE expires_at <= CURRENT_TIMESTAMP');

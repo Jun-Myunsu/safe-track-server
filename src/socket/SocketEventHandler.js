@@ -1,3 +1,5 @@
+const SocketRateLimiter = require('../middleware/socketRateLimiter');
+
 /**
  * Socket.IO 이벤트 핸들러
  * 모든 소켓 이벤트를 등록하고 관리
@@ -7,6 +9,8 @@ class SocketEventHandler {
     this.io = io;
     this.controllers = controllers;
     this.services = services;
+    this.rateLimiter = new SocketRateLimiter();
+    this.connectionCount = new Map();
   }
 
   /**
@@ -29,7 +33,28 @@ class SocketEventHandler {
    * 새 연결 처리
    */
   handleConnection(socket) {
-    console.log('사용자 연결:', socket.id, '| IP:', socket.handshake.address);
+    const ip = socket.handshake.address;
+    
+    // IP별 동시 접속 수 제한
+    const currentConnections = this.connectionCount.get(ip) || 0;
+    if (currentConnections >= 5) {
+      socket.emit('error', { message: '동시 접속 수 초과' });
+      socket.disconnect(true);
+      return;
+    }
+    
+    this.connectionCount.set(ip, currentConnections + 1);
+    
+    socket.on('disconnect', () => {
+      const count = this.connectionCount.get(ip) || 1;
+      if (count <= 1) {
+        this.connectionCount.delete(ip);
+      } else {
+        this.connectionCount.set(ip, count - 1);
+      }
+    });
+    
+    console.log('사용자 연결:', socket.id, '| IP:', ip);
     socket.emit('userList', this.services.userService.getAllOnlineUsers());
   }
 
@@ -38,16 +63,32 @@ class SocketEventHandler {
    */
   registerAuthEvents(socket) {
     const { authController } = this.controllers;
+    const ip = socket.handshake.address;
 
-    socket.on('validateSession', (data) =>
-      authController.handleValidateSession(socket, data)
-    );
-    socket.on('register', (data) =>
-      authController.handleRegister(socket, data)
-    );
-    socket.on('login', (data) =>
-      authController.handleLogin(socket, data)
-    );
+    socket.on('validateSession', (data) => {
+      if (!this.rateLimiter.check(ip, 'validateSession', 10, 60000)) {
+        socket.emit('error', { message: '요청이 너무 빠릅니다' });
+        return;
+      }
+      authController.handleValidateSession(socket, data);
+    });
+    
+    socket.on('register', (data) => {
+      if (!this.rateLimiter.check(ip, 'register', 3, 300000)) {
+        socket.emit('registerError', { message: '회원가입 시도가 너무 많습니다' });
+        return;
+      }
+      authController.handleRegister(socket, data);
+    });
+    
+    socket.on('login', (data) => {
+      if (!this.rateLimiter.check(ip, 'login', 5, 300000)) {
+        socket.emit('loginError', { message: '로그인 시도가 너무 많습니다' });
+        return;
+      }
+      authController.handleLogin(socket, data);
+    });
+    
     socket.on('logout', (data) =>
       authController.handleLogout(socket, data)
     );
