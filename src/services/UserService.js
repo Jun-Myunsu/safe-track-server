@@ -7,10 +7,16 @@ class UserService {
   }
 
   addOnlineUser(userId, socketId) {
+    // 기존 사용자가 있다면 추적 중지
+    if (this.onlineUsers.has(userId)) {
+      const existingUser = this.onlineUsers.get(userId);
+      existingUser.isTracking = false;
+    }
+    
     this.onlineUsers.set(userId, { 
       name: userId, 
       socketId, 
-      isTracking: false 
+      isTracking: false // 항상 false로 시작
     });
   }
 

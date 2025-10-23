@@ -60,10 +60,17 @@ class LocationService {
 
     request.status = 'accepted';
     
+    // from -> to 권한 추가 (공유하는 사람)
     if (!this.sharePermissions.has(request.from)) {
       this.sharePermissions.set(request.from, new Set());
     }
     this.sharePermissions.get(request.from).add(request.to);
+    
+    // to -> from 권한 추가 (공유받는 사람도 메시지 보낼 수 있도록)
+    if (!this.sharePermissions.has(request.to)) {
+      this.sharePermissions.set(request.to, new Set());
+    }
+    this.sharePermissions.get(request.to).add(request.from);
     
     return request;
   }
@@ -81,10 +88,19 @@ class LocationService {
   }
 
   stopLocationShare(fromUserId, targetUserId) {
+    // from -> to 권한 제거
     if (this.sharePermissions.has(fromUserId)) {
       this.sharePermissions.get(fromUserId).delete(targetUserId);
       if (this.sharePermissions.get(fromUserId).size === 0) {
         this.sharePermissions.delete(fromUserId);
+      }
+    }
+    
+    // to -> from 권한 제거
+    if (this.sharePermissions.has(targetUserId)) {
+      this.sharePermissions.get(targetUserId).delete(fromUserId);
+      if (this.sharePermissions.get(targetUserId).size === 0) {
+        this.sharePermissions.delete(targetUserId);
       }
     }
   }

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /B c:Devai-contentprojectsafe-tracksafe-track-serversrc)",
+      "Bash(node -e \"const SafeTrackServer = require(''./src/app''); console.log(''✓ app.js 모듈 로드 성공'');\")",
+      "Bash(node -e \"const SafeTrackServer = require(''./src/app''); const SocketEventHandler = require(''./src/socket/SocketEventHandler''); const KeepAliveService = require(''./src/services/KeepAliveService''); const { configureExpressMiddleware } = require(''./src/middleware/expressConfig''); const { SERVER_URLS, LOG_MESSAGES } = require(''./src/constants/app''); console.log(''✓ 모든 새 모듈 로드 성공\\n✓ SocketEventHandler 로드됨\\n✓ KeepAliveService 로드됨\\n✓ expressConfig 로드됨\\n✓ constants/app 로드됨'');\")",
+      "Bash(node -e \"const SafeTrackServer = require(''./src/app''); console.log(''✓ SafeTrackServer 로드 성공'');\")",
+      "Read(//c/Dev/ai-content/project/safe-track/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,67 +1,26 @@
 const AuthService = require('../services/AuthService');
 
 class AuthController {
-  constructor(userService, locationService, io) {
+  constructor(userService, io) {
     this.userService = userService;
-    this.locationService = locationService;
     this.io = io;
-  }
-
-  /**
-   * 로그인 후 공유 상태 복원 (추적 상태는 항상 false로 시작)
-   */
-  restoreShareState(socket, userId) {
-    const user = this.userService.getOnlineUser(userId);
-    if (!user) return;
-
-    // 내가 공유하고 있는 사용자 목록
-    const sharedUsers = [];
-    const sharePermissions = this.locationService.getSharedUsers(userId);
-    if (sharePermissions) {
-      sharePermissions.forEach(targetUserId => {
-        const targetUser = this.userService.getOnlineUser(targetUserId);
-        if (targetUser) {
-          sharedUsers.push({ id: targetUserId, name: targetUserId });
-        }
-      });
-    }
-
-    // 나를 받고 있는 사용자 목록
-    const receivedShares = [];
-    const allUsers = this.userService.getAllOnlineUsers();
-    allUsers.forEach(otherUser => {
-      const otherSharePermissions = this.locationService.getSharedUsers(otherUser.id);
-      if (otherSharePermissions && otherSharePermissions.has(userId)) {
-        receivedShares.push({ id: otherUser.id, name: otherUser.id });
-      }
-    });
-
-    // 추적 상태는 항상 false로 시작 (수동 시작 필요)
-    socket.emit('restoreState', {
-      sharedUsers,
-      receivedShares,
-      isTracking: false
-    });
   }
 
   async handleValidateSession(socket, data) {
     try {
       const { sessionId } = data;
       const session = await AuthService.validateSession(sessionId);
-
+      
       if (session) {
         const userId = session.user_id;
         this.userService.addOnlineUser(userId, socket.id);
         socket.userId = userId;
         socket.sessionId = sessionId;
-
+        
         await AuthService.updateSession(sessionId, socket.id);
-
+        
         socket.emit('sessionValid', { userId });
         this.io.emit('userList', this.userService.getAllOnlineUsers());
-
-        // 공유 상태 복원
-        this.restoreShareState(socket, userId);
       } else {
         socket.emit('sessionInvalid');
       }
@@ -73,15 +32,15 @@ class AuthController {
   async handleRegister(socket, userData) {
     try {
       const { userId, password } = userData;
-
+      
       await AuthService.register(userId, password);
-
+      
       this.userService.addOnlineUser(userId, socket.id);
       socket.userId = userId;
-
+      
       const sessionId = await AuthService.createSession(userId, socket.id);
       socket.sessionId = sessionId;
-
+      
       socket.emit('registerSuccess', { userId, sessionId });
       this.io.emit('userList', this.userService.getAllOnlineUsers());
     } catch (error) {
@@ -92,23 +51,20 @@ class AuthController {
   async handleLogin(socket, userData) {
     try {
       const { userId, password } = userData;
-
+      
       await AuthService.login(userId, password);
-
+      
       // 기존 세션 정리
       this.userService.removeOnlineUser(userId);
-
+      
       this.userService.addOnlineUser(userId, socket.id);
       socket.userId = userId;
-
+      
       const sessionId = await AuthService.createSession(userId, socket.id);
       socket.sessionId = sessionId;
-
+      
       socket.emit('loginSuccess', { userId, sessionId });
       this.io.emit('userList', this.userService.getAllOnlineUsers());
-
-      // 공유 상태 복원
-      this.restoreShareState(socket, userId);
     } catch (error) {
       socket.emit('loginError', { message: error.message });
     }
@@ -117,15 +73,15 @@ class AuthController {
   async handleLogout(socket, data) {
     const { userId } = data;
     const user = this.userService.getOnlineUser(userId);
-
+    
     if (user) {
       this.userService.setUserTracking(userId, false);
       this.userService.removeOnlineUser(userId);
-
+      
       if (socket.sessionId) {
         await AuthService.deleteSession(socket.sessionId);
       }
-
+      
       this.io.emit('userList', this.userService.getAllOnlineUsers());
     }
   }

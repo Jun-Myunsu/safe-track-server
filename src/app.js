@@ -6,37 +6,58 @@ const socketIo = require('socket.io');
 const config = require('./config/server');
 const { initDatabase } = require('./utils/database');
 const Session = require('./models/Session');
+const { configureExpressMiddleware } = require('./middleware/expressConfig');
+const { SERVER_URLS, LOG_MESSAGES } = require('./constants/app');
 
 // Services
 const UserService = require('./services/UserService');
 const LocationService = require('./services/LocationService');
 const ChatService = require('./services/ChatService');
+const KeepAliveService = require('./services/KeepAliveService');
+const AIChatService = require('./services/AIChatService');
 
 // Controllers
 const AuthController = require('./controllers/AuthController');
 const LocationController = require('./controllers/LocationController');
 const UserController = require('./controllers/UserController');
 const ChatController = require('./controllers/ChatController');
+const AIChatController = require('./controllers/AIChatController');
 
+// Socket Handler
+const SocketEventHandler = require('./socket/SocketEventHandler');
+
+/**
+ * Safe Track 서버 애플리케이션
+ * Express와 Socket.IO를 사용한 실시간 위치 공유 서버
+ */
 class SafeTrackServer {
   constructor() {
     this.app = express();
     this.server = http.createServer(this.app);
     this.io = socketIo(this.server, { cors: config.cors });
-    
+
+    this.initializeMiddleware();
     this.setupRoutes();
-    this.initServices();
-    this.initControllers();
-    this.setupSocketHandlers();
-    this.startCleanupTasks();
-    this.startKeepAlive();
+    this.initializeServices();
+    this.initializeControllers();
+    this.setupSocketIO();
+    this.startBackgroundTasks();
   }
 
+  /**
+   * Express 미들웨어 초기화
+   */
+  initializeMiddleware() {
+    configureExpressMiddleware(this.app);
+  }
+
+  /**
+   * HTTP 라우트 설정
+   */
   setupRoutes() {
-    // Keep-alive 엔드포인트
-    this.app.get('/ping', (req, res) => {
-      res.json({ 
-        status: 'alive', 
+    this.app.get('/ping', (_req, res) => {
+      res.json({
+        status: 'alive',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
         onlineUsers: this.userService ? this.userService.getOnlineUserCount() : 0
@@ -44,107 +65,103 @@ class SafeTrackServer {
     });
   }
 
-  initServices() {
+  /**
+   * 서비스 레이어 초기화
+   */
+  initializeServices() {
     this.userService = new UserService();
     this.locationService = new LocationService();
     this.chatService = new ChatService(this.locationService, this.userService);
+    this.aiChatService = new AIChatService();
+
+    // Keep-alive 서비스 초기화
+    const serverUrl = process.env.RENDER_EXTERNAL_URL || SERVER_URLS.DEFAULT_RENDER_URL;
+    this.keepAliveService = new KeepAliveService(serverUrl, 5);
   }
 
-  initControllers() {
-    this.authController = new AuthController(this.userService, this.io);
-    this.locationController = new LocationController(this.userService, this.locationService, this.io);
+  /**
+   * 컨트롤러 레이어 초기화
+   */
+  initializeControllers() {
+    this.authController = new AuthController(this.userService, this.locationService, this.io);
+    this.locationController = new LocationController(
+      this.userService,
+      this.locationService,
+      this.io
+    );
     this.userController = new UserController(this.userService, this.io);
-    this.chatController = new ChatController(this.chatService, this.userService, this.io);
+    this.chatController = new ChatController(
+      this.chatService,
+      this.userService,
+      this.io
+    );
+    this.aiChatController = new AIChatController(this.aiChatService, this.userService, this.io);
   }
 
-  setupSocketHandlers() {
-    this.io.on('connection', (socket) => {
-      console.log('사용자 연결:', socket.id, '| IP:', socket.handshake.address);
-      
-      socket.emit('userList', this.userService.getAllOnlineUsers());
+  /**
+   * Socket.IO 이벤트 핸들러 설정
+   */
+  setupSocketIO() {
+    const controllers = {
+      authController: this.authController,
+      locationController: this.locationController,
+      userController: this.userController,
+      aiChatController: this.aiChatController,
+      chatController: this.chatController,
+    };
 
-      // Auth events
-      socket.on('validateSession', (data) => this.authController.handleValidateSession(socket, data));
-      socket.on('register', (data) => this.authController.handleRegister(socket, data));
-      socket.on('login', (data) => this.authController.handleLogin(socket, data));
-      socket.on('logout', (data) => this.authController.handleLogout(socket, data));
+    const services = {
+      userService: this.userService,
+      locationService: this.locationService,
+      chatService: this.chatService,
+      aiChatService: this.aiChatService,
+    };
 
-      // User events
-      socket.on('checkUserId', (data) => this.userController.handleCheckUserId(socket, data));
-      socket.on('reconnect', (data) => this.userController.handleReconnect(socket, data));
-      socket.on('searchUsers', (data) => this.userController.handleSearchUsers(socket, data));
-      socket.on('addFriend', (data) => this.userController.handleAddFriend(socket, data));
-      socket.on('getFriends', (data) => this.userController.handleGetFriends(socket, data));
-      socket.on('removeFriend', (data) => this.userController.handleRemoveFriend(socket, data));
-
-      // Location events
-      socket.on('startTracking', (data) => this.locationController.handleStartTracking(socket, data));
-      socket.on('locationUpdate', (data) => this.locationController.handleLocationUpdate(socket, data));
-      socket.on('stopTracking', (data) => this.locationController.handleStopTracking(socket, data));
-      socket.on('requestLocationShare', (data) => this.locationController.handleRequestLocationShare(socket, data));
-      socket.on('respondLocationShare', (data) => this.locationController.handleRespondLocationShare(socket, data));
-      socket.on('stopLocationShare', (data) => this.locationController.handleStopLocationShare(socket, data));
-      socket.on('stopReceivingShare', (data) => this.locationController.handleStopReceivingShare(socket, data));
-      socket.on('requestCurrentLocation', (data) => this.locationController.handleRequestCurrentLocation(socket, data));
-
-      // Chat events
-      socket.on('sendMessage', (data) => this.chatController.handleSendMessage(socket, data));
-
-      // Keep-alive
-      socket.on('ping', () => {
-        socket.emit('pong', { timestamp: new Date().toISOString() });
-      });
-
-      // Disconnect
-      socket.on('disconnect', () => this.handleDisconnect(socket));
-    });
+    this.socketEventHandler = new SocketEventHandler(this.io, controllers, services);
+    this.socketEventHandler.initialize();
   }
 
-  handleDisconnect(socket) {
-    if (socket.userId) {
-      const user = this.userService.getOnlineUser(socket.userId);
-      if (user && user.socketId === socket.id) {
-        this.userService.setUserTracking(socket.userId, false);
-        this.locationService.removeLocation(socket.userId);
-        this.userService.removeOnlineUser(socket.userId);
-        
-        this.io.emit('trackingStatusUpdate', { userId: socket.userId, isTracking: false });
-        
-        setTimeout(() => {
-          this.io.emit('userList', this.userService.getAllOnlineUsers());
-        }, 1000);
-      }
-    }
+  /**
+   * 백그라운드 작업 시작
+   */
+  startBackgroundTasks() {
+    this.startSessionCleanup();
+    this.keepAliveService.start();
   }
 
-  startCleanupTasks() {
+  /**
+   * 만료된 세션 정리 작업 시작
+   */
+  startSessionCleanup() {
     setInterval(() => {
       Session.cleanExpired();
     }, config.session.cleanupInterval);
   }
 
-  startKeepAlive() {
-    // 자체 ping으로 sleep 방지 (5분마다)
-    if (process.env.NODE_ENV === 'production') {
-      const serverUrl = process.env.RENDER_EXTERNAL_URL || 'https://safe-track-server.onrender.com';
-      
-      setInterval(async () => {
-        try {
-          const response = await fetch(`${serverUrl}/ping`);
-          const data = await response.json();
-          console.log('Keep-alive ping:', data.status, '| Users:', data.onlineUsers);
-        } catch (error) {
-          console.log('Keep-alive ping failed:', error.message);
-        }
-      }, 5 * 60 * 1000); // 5분마다
-    }
-  }
-
+  /**
+   * 서버 시작
+   */
   async start() {
     await initDatabase();
-    
+
     this.server.listen(config.port, '0.0.0.0', () => {
-      console.log(`Safe Track Server running on port ${config.port}`);
+      console.log(`${LOG_MESSAGES.SERVER_STARTED} ${config.port}`);
+    });
+  }
+
+  /**
+   * 서버 종료 (Graceful shutdown)
+   */
+  async shutdown() {
+    console.log('서버 종료 시작...');
+
+    this.keepAliveService.stop();
+
+    return new Promise((resolve) => {
+      this.server.close(() => {
+        console.log('서버가 안전하게 종료되었습니다.');
+        resolve();
+      });
     });
   }
 }
