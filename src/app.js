@@ -22,6 +22,7 @@ const LocationController = require('./controllers/LocationController');
 const UserController = require('./controllers/UserController');
 const ChatController = require('./controllers/ChatController');
 const AIChatController = require('./controllers/AIChatController');
+const SettingsController = require('./controllers/SettingsController');
 
 // Socket Handler
 const SocketEventHandler = require('./socket/SocketEventHandler');
@@ -106,6 +107,7 @@ class SafeTrackServer {
       this.io
     );
     this.aiChatController = new AIChatController(this.aiChatService, this.userService, this.io);
+    this.settingsController = new SettingsController();
   }
 
   /**
@@ -118,6 +120,7 @@ class SafeTrackServer {
       userController: this.userController,
       aiChatController: this.aiChatController,
       chatController: this.chatController,
+      settingsController: this.settingsController,
     };
 
     const services = {

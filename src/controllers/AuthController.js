@@ -1,4 +1,5 @@
 const AuthService = require('../services/AuthService');
+const Settings = require('../models/Settings');
 
 class AuthController {
   constructor(userService, locationService, io) {
@@ -84,6 +85,13 @@ class AuthController {
   async handleRegister(socket, userData) {
     try {
       const { userId, password } = userData;
+
+      // 회원가입 허용 여부 확인
+      const isEnabled = await Settings.isRegistrationEnabled();
+      if (!isEnabled) {
+        socket.emit('registerError', { message: '현재 회원가입을 받지 않습니다' });
+        return;
+      }
 
       await AuthService.register(userId, password);
 

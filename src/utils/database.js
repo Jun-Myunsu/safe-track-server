@@ -1,5 +1,5 @@
-const bcrypt = require('bcrypt');
-const pool = require('../config/database');
+const bcrypt = require("bcrypt");
+const pool = require("../config/database");
 
 async function initDatabase() {
   try {
@@ -37,28 +37,24 @@ async function initDatabase() {
       )
     `);
 
-    // 기본 테스트 계정 생성
-    const defaultUsers = [
-      { id: 'test1', password: 'test1' },
-      { id: 'test2', password: 'test2' },
-      { id: 'user1', password: 'user1' }
-    ];
+    // settings 테이블 생성
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key VARCHAR(50) PRIMARY KEY,
+        value VARCHAR(255) NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-    for (const user of defaultUsers) {
-      const existingUser = await pool.query('SELECT id FROM users WHERE id = $1', [user.id]);
-      if (existingUser.rows.length === 0) {
-        const hashedPassword = await bcrypt.hash(user.password, 10);
-        await pool.query(
-          'INSERT INTO users (id, password) VALUES ($1, $2)',
-          [user.id, hashedPassword]
-        );
-        console.log(`기본 계정 생성: ${user.id}`);
-      }
-    }
+    // 기본 설정 추가
+    // await pool.query(`
+    //   INSERT INTO settings (key, value) VALUES ('registration_enabled', 'true')
+    //   ON CONFLICT (key) DO NOTHING
+    // `);
 
-    console.log('데이터베이스 초기화 완료');
+    console.log("데이터베이스 초기화 완료");
   } catch (error) {
-    console.error('데이터베이스 초기화 실패:', error);
+    console.error("데이터베이스 초기화 실패:", error);
   }
 }
 

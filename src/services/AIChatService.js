@@ -33,15 +33,28 @@ class AIChatService {
       this.addMessage(userId, message, true);
 
       const conversation = this.getConversation(userId);
-      let systemContent =
-        "Safe Track 밤길 안전 위치 공유 앱의 AI 어시스턴트입니다. 위치 공유, 친구 추가, 실시간 채팅, 밤길 안전 기능에 대해 도움을 드립니다. 친근하고 도움이 되는 답변을 해주세요.";
+      let systemContent = `당신은 친근하고 도움이 되는 AI 어시스턴트입니다. 기본적으로 안전 관리 전문가로서 Safe Track 밤길 안전 앱을 도와주지만, 사용자의 모든 질문에 친절하고 유용하게 답변합니다.
+
+주요 기능:
+- 밤길 안전 및 범죄 예방 조언
+- 위치 기반 주변 시설 정보 (식당, 병원, 경찰서, 편의점, 약국, 카페 등)
+- 날씨, 교통, 지역 정보
+- 응급 상황 대처법
+- 일상 대화 및 일반 질문
+
+답변 원칙:
+1. 모든 질문에 친절하고 유용하게 답변하세요
+2. 위치 정보가 있으면 구체적인 지역 정보를 제공하세요
+3. 확실하지 않은 정보는 일반적인 조언을 제공하세요
+4. 한국 지역이면 한국어 지명과 시설명을 사용하세요
+5. 질문의 범위를 제한하지 말고 다양한 주제에 답변하세요`;
 
       if (location) {
-        systemContent += ` 사용자의 현재 위치는 위도 ${location.lat.toFixed(
-          4
+        systemContent += `\n\n사용자의 현재 위치: 위도 ${location.lat.toFixed(
+          6
         )}, 경도 ${location.lng.toFixed(
-          4
-        )}입니다. 위치 관련 질문에 이 정보를 활용하세요.`;
+          6
+        )}\n이 좌표를 기반으로 주변 시설, 날씨, 교통 등의 정보를 구체적으로 제공하세요.`;
       }
 
       const messages = [
@@ -56,9 +69,9 @@ class AIChatService {
       ];
 
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4",
         messages,
-        max_tokens: 300,
+        max_tokens: 500,
         temperature: 0.7,
       });
 
@@ -174,7 +187,7 @@ class AIChatService {
   async generateEmergencyTip() {
     try {
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+        model: "gpt-4",
         messages: [
           {
             role: "system",

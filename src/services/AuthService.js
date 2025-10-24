@@ -11,6 +11,10 @@ class AuthService {
       throw new Error('아이디는 4자리 이상 입력하세요');
     }
 
+    if (/^\d+$/.test(userId)) {
+      throw new Error('아이디는 숫자만 사용할 수 없습니다');
+    }
+
     if (password.length < 4) {
       throw new Error('비밀번호는 4자리 이상 입력하세요');
     }

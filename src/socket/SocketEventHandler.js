@@ -24,6 +24,7 @@ class SocketEventHandler {
       this.registerLocationEvents(socket);
       this.registerChatEvents(socket);
       this.registerAIChatEvents(socket);
+      this.registerSettingsEvents(socket);
       this.registerUtilityEvents(socket);
       this.registerDisconnectEvent(socket);
     });
@@ -74,15 +75,15 @@ class SocketEventHandler {
     });
     
     socket.on('register', (data) => {
-      if (!this.rateLimiter.check(ip, 'register', 3, 300000)) {
-        socket.emit('registerError', { message: '회원가입 시도가 너무 많습니다' });
-        return;
-      }
+      // if (!this.rateLimiter.check(ip, 'register', 3, 300000)) {
+      //   socket.emit('registerError', { message: '회원가입 시도가 너무 많습니다' });
+      //   return;
+      // }
       authController.handleRegister(socket, data);
     });
     
     socket.on('login', (data) => {
-      if (!this.rateLimiter.check(ip, 'login', 5, 300000)) {
+      if (!this.rateLimiter.check(ip, 'login', 100, 300000)) {
         socket.emit('loginError', { message: '로그인 시도가 너무 많습니다' });
         return;
       }
@@ -194,6 +195,20 @@ class SocketEventHandler {
     socket.on('ping', () => {
       socket.emit('pong', { timestamp: new Date().toISOString() });
     });
+  }
+
+  /**
+   * 설정 관련 이벤트 등록
+   */
+  registerSettingsEvents(socket) {
+    const { settingsController } = this.controllers;
+
+    socket.on('getRegistrationStatus', () =>
+      settingsController.getRegistrationStatus(socket)
+    );
+    socket.on('toggleRegistration', (data) =>
+      settingsController.toggleRegistration(socket, data)
+    );
   }
 
   /**
