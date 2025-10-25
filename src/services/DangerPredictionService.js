@@ -410,14 +410,19 @@ class DangerPredictionService {
       : 0;
 
     if (conf < 0.6 || gaps >= 2) {
-      // 점수 하향 (결핍*5 + (0.6-conf)*20)
-      const penalty = gaps * 5 + (0.6 - conf) * 20;
+      // 데이터 결핍이 많으면 더 공격적으로 하향 (결핍*8 + (0.6-conf)*25)
+      const penalty = gaps * 8 + (0.6 - conf) * 25;
       modelJson.risk.score = Math.max(
         0,
         modelJson.risk.score - Math.max(0, penalty)
       );
       modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
-      if (modelJson.risk.level === "CRITICAL") {
+      
+      // CRITICAL/HIGH를 MEDIUM 이하로 제한 (데이터 부족 시)
+      if (gaps >= 4 && modelJson.risk.level !== "LOW") {
+        modelJson.risk.score = Math.min(modelJson.risk.score, 35);
+        modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
+      } else if (modelJson.risk.level === "CRITICAL") {
         modelJson.risk.level = "HIGH";
         modelJson.risk.score = Math.min(modelJson.risk.score, 74);
       }
