@@ -413,9 +413,13 @@ class DangerPredictionService {
   // 신뢰도 낮거나 데이터 결핍 많으면 하향 보정 + CRITICAL 캡
   downgradeOnLowConfidence(modelJson, userPayload) {
     const conf = Number(modelJson?.risk?.confidence ?? 0.5);
-    const gaps = Array.isArray(modelJson?.risk?.data_gaps)
-      ? modelJson.risk.data_gaps.length
-      : 0;
+    // data_gaps는 문자열 배열이 아니라 쉼표로 구분된 문자열일 수 있음
+    let gaps = 0;
+    if (Array.isArray(modelJson?.risk?.data_gaps)) {
+      gaps = modelJson.risk.data_gaps.length;
+    } else if (typeof modelJson?.risk?.data_gaps === 'string') {
+      gaps = modelJson.risk.data_gaps.split(',').length;
+    }
 
     // 시간대와 응급시설 기반 기본 점수 계산
     const facilities = userPayload.emergency_facilities || {};
@@ -433,8 +437,8 @@ class DangerPredictionService {
     else if (totalFacilities === 1) baseScore += 10;
     else if (totalFacilities === 2) baseScore += 5;
     
-    // 데이터 결핍이 많으면 기본 점수 사용
-    if (gaps >= 4) {
+    // 신뢰도가 낮으면 무조건 기본 점수 사용
+    if (conf < 0.5) {
       modelJson.risk.score = baseScore;
       modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
     } else if (conf < 0.6 || gaps >= 2) {
