@@ -7,6 +7,9 @@ const { apiLimiter } = require('./rateLimiter');
  * @param {express.Application} app - Express 앱 인스턴스
  */
 function configureExpressMiddleware(app) {
+  // Trust proxy for Render deployment
+  app.set('trust proxy', 1);
+
   // JSON 파싱
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));

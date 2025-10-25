@@ -2,10 +2,12 @@
 const OpenAI = require("openai");
 
 /**
- * AI 기반 위험 지역 예측 서비스 (강화 버전)
+ * AI 기반 위험 지역 예측 서비스 (강화 버전, 하향 보정/캘리브레이션 포함)
  * - 정밀 프롬프트/스키마 통합
  * - JSON 응답 강제(response_format)
  * - 신스키마 → 레거시 포맷 자동 변환(하위 호환)
+ * - 점수→레벨 강제 재산출, 불확실성/안전시그널 하향 캡
+ * - 색상/반경을 레벨과 절대 동기화
  */
 class DangerPredictionService {
   constructor() {
@@ -50,12 +52,26 @@ class DangerPredictionService {
 지도로의 매핑
 - 현재 지점 표시는 marker.icon, marker.color, radius_m로 제공합니다.
 - 열지도/버퍼 표현을 위해 heat.contributors 배열(요인별 가중·근거)을 제공합니다.
+- heat.contributors에는 위험도를 높이는 요인(score_delta > 0)과 낮추는 요인(score_delta < 0) 모두 포함하세요. 안전한 지역도 표시하기 위해 음수 score_delta를 적극 활용하세요.
 - 경로 위험 평가가 들어오면 segments[]에 각 구간별 점수와 이유를 제공합니다.
 
 안전 권고
 - 2–5개의 즉시 실행 가능 권고를 중요도 순으로 작성합니다.
 - 과도한 공포 유발 표현, 법률/의료적 조언 단정, 불가능한 지시 금지.
 `.trim();
+
+    // 캘리브레이션 가이드(추가 주입)
+    this.SYSTEM_PROMPT += `
+
+캘리브레이션 가이드:
+- 밝은 주간, 유동/차량 많음, 영업 중 상가/교통요지, CCTV 많음 => 보통 LOW(10~20), confidence 0.7~0.9
+- 흐린 저녁, 보행자 중간, 상가 일부 영업, CCTV 보통 => 보통 MEDIUM(30~45)
+- 심야 한산, 조도 낮음, 빈 골목, 폐쇄 상가, 사건 이력 인접 => HIGH(55~70)
+- 특수 위험 신호(최근 중대 사건 2h/100m 내, 대규모 충돌 등) => CRITICAL(75~90)
+
+반드시 위험/안전 요인을 모두 고려하여 음/양의 score_delta를 제공합니다.
+데이터 결핍이 크면 score를 낮추고 confidence를 0.5 이하로 설정합니다.
+`;
 
     // ======== 프롬프트: 개발자(스키마 고정) ========
     this.DEV_PROMPT_SCHEMA = `
@@ -128,22 +144,26 @@ class DangerPredictionService {
     emergencyFacilities = { hospitals: [], police: [], stations: [] },
 
     // 선택 입력(없으면 unknown으로 처리)
-    weather = null,          // { condition, precip_mm, temp_c, wind_mps, is_rain, is_snow }
-    lighting = null,         // { sun_state, street_lights }
+    weather = null, // { condition, precip_mm, temp_c, wind_mps, is_rain, is_snow }
+    lighting = null, // { sun_state, street_lights }
     footTraffic = "unknown", // "low|medium|high|unknown"
     vehicleTraffic = "unknown",
-    openPois = [],           // [{type,name,distance_m}]
+    openPois = [], // [{type,name,distance_m}]
     cctvDensity = "unknown", // "low|medium|high|unknown"
-    recentIncidents = [],    // [{type, age_hours, distance_m, severity}]
-    events = [],             // [{name, distance_m, crowd_level}]
-    segments = []            // [{from:[lat,lng], to:[lat,lng]}]
+    recentIncidents = [], // [{type, age_hours, distance_m, severity}]
+    events = [], // [{name, distance_m, crowd_level}]
+    segments = [], // [{from:[lat,lng], to:[lat,lng]}]
   }) {
     if (!process.env.OPENAI_API_KEY) {
       console.warn("OpenAI API key not configured");
       return {
         success: false,
         error: "OpenAI API key not configured",
-        data: this.generateDefaultSafetyInfo(currentLocation, timestamp, emergencyFacilities),
+        data: this.generateDefaultSafetyInfo(
+          currentLocation,
+          timestamp,
+          emergencyFacilities
+        ),
       };
     }
 
@@ -155,18 +175,24 @@ class DangerPredictionService {
       const isNight = hour >= 22 || hour < 6;
       const isRushHour = (hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19);
       const timeOfDay =
-        hour >= 6 && hour < 12 ? "아침" :
-        hour >= 12 && hour < 18 ? "오후" :
-        hour >= 18 && hour < 22 ? "저녁" : "심야";
+        hour >= 6 && hour < 12
+          ? "아침"
+          : hour >= 12 && hour < 18
+          ? "오후"
+          : hour >= 18 && hour < 22
+          ? "저녁"
+          : "심야";
 
       const recentMovements = locationHistory.slice(-10);
       const hasLocationHistory = recentMovements.length > 0;
-      const locationStability = recentMovements.length >= 3 ? "안정적" : "불안정";
+      const locationStability =
+        recentMovements.length >= 3 ? "안정적" : "불안정";
 
       const hospitalCount = emergencyFacilities.hospitals?.length || 0;
       const policeCount = emergencyFacilities.police?.length || 0;
       const stationCount = emergencyFacilities.stations?.length || 0;
-      const totalEmergencyFacilities = hospitalCount + policeCount + stationCount;
+      const totalEmergencyFacilities =
+        hospitalCount + policeCount + stationCount;
 
       // 내부 메타 스코어(참고용)
       let riskScore = 0;
@@ -184,17 +210,27 @@ class DangerPredictionService {
         currentLocation: {
           lat: currentLocation.lat,
           lng: currentLocation.lng,
-          address: `위도 ${Number(currentLocation.lat).toFixed(4)}, 경도 ${Number(currentLocation.lng).toFixed(4)}`
+          address: `위도 ${Number(currentLocation.lat).toFixed(
+            4
+          )}, 경도 ${Number(currentLocation.lng).toFixed(4)}`,
         },
         timeContext: {
           hour,
           timeOfDay,
           dayOfWeek,
-          dayName: ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"][dayOfWeek],
+          dayName: [
+            "일요일",
+            "월요일",
+            "화요일",
+            "수요일",
+            "목요일",
+            "금요일",
+            "토요일",
+          ][dayOfWeek],
           isWeekend,
           isWeekday: !isWeekend,
           isNight,
-          isRushHour
+          isRushHour,
         },
         locationHistory: {
           recentCount: recentMovements.length,
@@ -209,11 +245,18 @@ class DangerPredictionService {
         },
         riskScore: {
           total: riskScore,
-          timeScore: (hour >= 6 && hour < 18) ? 0 : (hour >= 18 && hour < 22) ? 10 : (hour >= 22 || hour < 2) ? 25 : 40,
+          timeScore:
+            hour >= 6 && hour < 18
+              ? 0
+              : hour >= 18 && hour < 22
+              ? 10
+              : hour >= 22 || hour < 2
+              ? 25
+              : 40,
           policeScore: policeCount >= 2 ? 0 : policeCount === 1 ? 10 : 30,
           hospitalScore: hospitalCount >= 2 ? 0 : hospitalCount === 1 ? 5 : 15,
           stationScore: stationCount >= 1 ? 0 : 15,
-          calculatedRiskLevel
+          calculatedRiskLevel,
         },
       };
 
@@ -222,7 +265,9 @@ class DangerPredictionService {
         location: {
           lat: Number(currentLocation.lat),
           lng: Number(currentLocation.lng),
-          address_hint: "",
+          address_hint: `위도 ${Number(currentLocation.lat).toFixed(
+            4
+          )}, 경도 ${Number(currentLocation.lng).toFixed(4)}`,
         },
         context: {
           timestamp_local: toLocalIso(timestamp),
@@ -235,7 +280,12 @@ class DangerPredictionService {
           recent_incidents: recentIncidents || [],
           events: events || [],
         },
-        segments: (segments || []),
+        segments: segments || [],
+        emergency_facilities: {
+          hospitals: hospitalCount,
+          police: policeCount,
+          stations: stationCount,
+        },
       };
 
       // ====== OpenAI 호출 ======
@@ -247,13 +297,26 @@ class DangerPredictionService {
           {
             role: "user",
             content:
-              "다음 위치/맥락에 대해 현재 위험도를 평가하고, 이전 메시지의 스키마(JSON)로만 답하세요. 데이터가 부족하면 data_gaps에 사유를 명시하고 confidence를 낮추세요.\n\n" +
-              JSON.stringify(userPayload),
+              `다음 위치/맥락에 대해 현재 위험도를 평가하고, 이전 메시지의 스키마(JSON)로만 답하세요. 데이터가 부족하면 data_gaps에 사유를 명시하고 confidence를 낮추세요.
+
+현재 시각: ${toLocalIso(timestamp)} (${timeOfDay}, ${
+                isWeekend ? "주말" : "평일"
+              })
+위치: 위도 ${Number(currentLocation.lat).toFixed(6)}, 경도 ${Number(
+                currentLocation.lng
+              ).toFixed(6)}
+주변 응급시설: 병원 ${hospitalCount}개, 경찰서 ${policeCount}개, 지하철역 ${stationCount}개
+
+중요: heat.contributors에 반드시 위험도를 높이는 요인(score_delta > 0)과 낮추는 요인(score_delta < 0) 모두 포함하세요.
+예: [{"name": "조명 부족", "score_delta": 15, "rationale": "..."}, {"name": "CCTV 다수", "score_delta": -12, "rationale": "..."}]
+
+` + JSON.stringify(userPayload),
           },
         ],
         response_format: { type: "json_object" },
+        // 더 안정적으로: 편차 축소
         temperature: 0.2,
-        top_p: 0.9,
+        top_p: 1.0,
         presence_penalty: 0,
         frequency_penalty: 0,
         max_tokens: 1500,
@@ -265,23 +328,28 @@ class DangerPredictionService {
       // ====== 최소 스키마 검증(간단) ======
       const ok = this.validateModelSchema(modelJson);
       if (!ok) {
-        throw new Error("Invalid response format from OpenAI (schema mismatch)");
+        throw new Error(
+          "Invalid response format from OpenAI (schema mismatch)"
+        );
       }
 
-      // 레벨↔스타일 보정(모델이 잘못 주면 교정)
-      this.reconcileLevelStyles(modelJson);
+      // ====== 하향 보정/동기화 파이프라인 ======
+      this.enforceLevelByScore(modelJson); // 점수→레벨 강제
+      this.downgradeOnLowConfidence(modelJson); // 신뢰도/데이터결핍 하향 캡
+      this.applyContextualCaps(userPayload, modelJson); // 안전 시그널 기반 상한
+      this.reconcileLevelStyles(modelJson); // 색상/반경을 레벨과 절대 동기화
 
       // ====== 레거시 포맷으로도 변환(하위 호환) ======
       const legacy = this.toLegacyFormat(modelJson);
 
       return {
         success: true,
-        data: legacy,                  // <-- 기존 UI가 쓰던 포맷
+        data: legacy, // <-- 기존 UI가 쓰던 포맷
         metadata: {
           timestamp: timestamp.toISOString(),
           model: this.model,
           context: contextMeta,
-          raw_model: modelJson,       // <-- 필요 시 사용(새 스키마)
+          raw_model: modelJson, // <-- 필요 시 사용(새 스키마)
         },
       };
     } catch (error) {
@@ -289,8 +357,86 @@ class DangerPredictionService {
       return {
         success: false,
         error: error.message,
-        data: this.generateDefaultSafetyInfo(currentLocation, timestamp, emergencyFacilities),
+        data: this.generateDefaultSafetyInfo(
+          currentLocation,
+          timestamp,
+          emergencyFacilities
+        ),
       };
+    }
+  }
+
+  /* ===================== 보정/동기화 유틸 (클래스 내부) ===================== */
+
+  levelFromScore(score) {
+    if (score <= 24) return "LOW";
+    if (score <= 49) return "MEDIUM";
+    if (score <= 74) return "HIGH";
+    return "CRITICAL";
+  }
+
+  // 모델이 준 레벨을 무시하고 점수에서 재산출
+  enforceLevelByScore(modelJson) {
+    const s = Math.max(0, Math.min(100, Number(modelJson?.risk?.score || 0)));
+    const lvl = this.levelFromScore(s);
+    modelJson.risk.score = s;
+    modelJson.risk.level = lvl;
+  }
+
+  // 신뢰도 낮거나 데이터 결핍 많으면 하향 보정 + CRITICAL 캡
+  downgradeOnLowConfidence(modelJson) {
+    const conf = Number(modelJson?.risk?.confidence ?? 0.5);
+    const gaps = Array.isArray(modelJson?.risk?.data_gaps)
+      ? modelJson.risk.data_gaps.length
+      : 0;
+
+    if (conf < 0.6 || gaps >= 2) {
+      // 점수 하향 (결핍*5 + (0.6-conf)*20)
+      const penalty = gaps * 5 + (0.6 - conf) * 20;
+      modelJson.risk.score = Math.max(
+        0,
+        modelJson.risk.score - Math.max(0, penalty)
+      );
+      modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
+      if (modelJson.risk.level === "CRITICAL") {
+        modelJson.risk.level = "HIGH";
+        modelJson.risk.score = Math.min(modelJson.risk.score, 74);
+      }
+    }
+  }
+
+  // 밝음/혼잡/영업시설/CCTV 등 안전 시그널 다수면 MEDIUM 상한
+  applyContextualCaps(userPayload, modelJson) {
+    const ctx = userPayload.context || {};
+    const light = ctx.lighting || {};
+    const foot = String(ctx.foot_traffic || "unknown");
+    const veh = String(ctx.vehicle_traffic || "unknown");
+    const cctv = String(ctx.cctv_density || "unknown");
+    const pois = Array.isArray(ctx.open_pois) ? ctx.open_pois : [];
+
+    const isBright =
+      light.sun_state === "day" ||
+      (light.sun_state === "civil_twilight" && light.street_lights === "high");
+    const isBusy = foot === "high" || veh === "high";
+    const hasOpenPOIsNearby = pois.some(
+      (p) =>
+        Number(p.distance_m) <= 150 &&
+        /편의점|카페|약국|지하철|경찰|병원|mart|convenience|pharmacy|subway|police|hospital/i.test(
+          (p.type || "") + " " + (p.name || "")
+        )
+    );
+    const isCCTVGood = cctv === "high";
+
+    const safetySignals = [
+      isBright,
+      isBusy,
+      hasOpenPOIsNearby,
+      isCCTVGood,
+    ].filter(Boolean).length;
+
+    if (safetySignals >= 2) {
+      modelJson.risk.score = Math.min(modelJson.risk.score, 49); // MEDIUM 상한
+      modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
     }
   }
 
@@ -299,9 +445,7 @@ class DangerPredictionService {
    */
   validateModelSchema(obj) {
     if (!obj || typeof obj !== "object") return false;
-    const must = [
-      "location", "context", "risk", "map", "guidance", "heat"
-    ];
+    const must = ["location", "context", "risk", "map", "guidance", "heat"];
     for (const k of must) if (!(k in obj)) return false;
 
     // 핵심 필드
@@ -317,21 +461,18 @@ class DangerPredictionService {
   }
 
   /**
-   * 모델이 level에 맞지 않는 색/반경을 준 경우 스타일 보정
+   * 레벨에 맞게 색/반경을 절대 동기화 (일관 표현)
    */
   reconcileLevelStyles(modelJson) {
     const L = modelJson?.risk?.level || "MEDIUM";
     const style = this.levelStyle[L] || this.levelStyle.MEDIUM;
-    if (!/^#?[0-9a-fA-F]{6}$/.test(modelJson.map.color_hex || "")) {
-      modelJson.map.color_hex = style.color;
-    }
-    if (!Number.isFinite(modelJson.map.radius_m) || modelJson.map.radius_m <= 0) {
-      modelJson.map.radius_m = style.radius;
-    }
+
+    modelJson.map.color_hex = style.color; // 절대 동기화
+    modelJson.map.radius_m = style.radius; // 절대 동기화
     if (!modelJson.map.marker || typeof modelJson.map.marker !== "object") {
       modelJson.map.marker = { icon: "pin", color: style.color };
     } else {
-      modelJson.map.marker.color = modelJson.map.marker.color || style.color;
+      modelJson.map.marker.color = style.color;
       modelJson.map.marker.icon = modelJson.map.marker.icon || "pin";
     }
   }
@@ -339,7 +480,7 @@ class DangerPredictionService {
   /**
    * 새 스키마(JSON) → 기존 포맷(legacy) 변환
    * legacy:
-   *  - overallRiskLevel: "low|medium|high"
+   *  - overallRiskLevel: "low|medium|high|critical|safe"
    *  - dangerZones: [{lat,lng,radius,riskLevel,reason,recommendations[]}]
    *  - safetyTips: [string]
    *  - analysisTimestamp: iso
@@ -347,55 +488,111 @@ class DangerPredictionService {
   toLegacyFormat(modelJson) {
     const levelMap = {
       LOW: "low",
-      MEDIUM: "low",   // 기존 코드가 0-50을 low로 썼으므로 MEDIUM도 low로 매핑
-      HIGH: "medium",
-      CRITICAL: "medium",
+      MEDIUM: "medium",
+      HIGH: "high",
+      CRITICAL: "critical",
     };
 
     const overallRiskLevel = levelMap[modelJson.risk.level] || "low";
 
-    // 중심점 1개 + heat/segments 보조 → 4~6개로 구성
+    // 중심점 1개 + heat/segments 보조 → 5~7개로 구성
     const center = {
       lat: modelJson.location.lat,
       lng: modelJson.location.lng,
       radius: clamp(Math.round(modelJson.map.radius_m), 200, 500),
       riskLevel: levelMap[modelJson.risk.level] || "low",
       reason:
-        (modelJson.risk.top_factors?.[0]?.evidence) ||
+        modelJson.risk.top_factors?.[0]?.evidence ||
         "환경·조도·시설 밀도를 종합한 평가",
       recommendations: (modelJson.guidance.immediate_actions || []).slice(0, 3),
     };
 
-    // heat.contributors 기반 주변 포인트(간단하게 방사형 샘플)
-    const extras = (modelJson.heat?.contributors || [])
-      .slice(0, 4)
+    // heat.contributors 기반 주변 포인트 (위험/안전 지역 모두 포함)
+    const contributors = modelJson.heat?.contributors || [];
+    const extras = contributors
+      .slice(0, 5)
       .map((h, i) => {
-        const dMeters = 200 + i * 60; // 200~380m
-        const bearing = (i * Math.PI) / 2; // 0, 90, 180, 270 deg
+        const dMeters = 200 + i * 70; // 200~480m
+        const bearing = (i * Math.PI * 2) / 5; // 균등 분포
         const off = offsetLatLng(center.lat, center.lng, dMeters, bearing);
-        const up = (h.score_delta || 0) >= 0;
-        const lv = up ? "medium" : "low";
+        const delta = Number(h.score_delta || 0);
+
+        // score_delta 기반 위험도 결정
+        let lv;
+        if (delta >= 30) lv = "critical";
+        else if (delta >= 15) lv = "high";
+        else if (delta >= 5) lv = "medium";
+        else if (delta <= -10) lv = "safe"; // 안전 지역
+        else lv = "low";
+
         return {
           lat: off.lat,
           lng: off.lng,
-          radius: clamp(Math.round(modelJson.map.radius_m * 1.1), 220, 500),
+          radius: clamp(
+            Math.round(modelJson.map.radius_m * (lv === "safe" ? 0.9 : 1.1)),
+            180,
+            500
+          ),
           riskLevel: lv,
           reason: h.rationale || h.name || "요인 기반 가중치",
-          recommendations: up
-            ? [modelJson.guidance.route_advice || "밝은 길/혼잡 지역으로 경로 조정"]
-            : [modelJson.guidance.meeting_point || "인근 개방형 시설로 이동"],
+          recommendations:
+            delta >= 10
+              ? [
+                  modelJson.guidance.route_advice ||
+                    "밝은 길/혼잡 지역으로 경로 조정",
+                ]
+              : delta <= -10
+              ? [
+                  "안전한 지역입니다",
+                  modelJson.guidance.meeting_point || "대기 장소로 적합",
+                ]
+              : ["일반적인 주의가 필요합니다"],
         };
       });
 
-    // 최소 4개~최대 6개 유지
-    const zones = [center, ...extras].slice(0, 6);
-    while (zones.length < 4) zones.push({ ...center, radius: center.radius });
+    // 가장 안전한 지역 추가
+    const safestContributor = contributors.reduce((min, curr) => 
+      (curr.score_delta || 0) < (min.score_delta || 0) ? curr : min
+    , contributors[0] || { score_delta: 0 });
+    
+    // AI가 음수 score_delta를 제공하면 사용, 아니면 낮은 위험도 기반으로 생성
+    let shouldAddSafest = false;
+    let safestReason = "";
+    
+    if (safestContributor && safestContributor.score_delta <= 0) {
+      shouldAddSafest = true;
+      safestReason = safestContributor.rationale || safestContributor.name || "안전 요인 다수";
+    } else if (modelJson.risk.level === "LOW" || modelJson.risk.score < 30) {
+      shouldAddSafest = true;
+      safestReason = "전반적으로 안전한 지역입니다";
+    }
+    
+    if (shouldAddSafest) {
+      const safestOff = offsetLatLng(center.lat, center.lng, 350, Math.PI / 3);
+      extras.push({
+        lat: safestOff.lat,
+        lng: safestOff.lng,
+        radius: 250,
+        riskLevel: "safest",
+        reason: `가장 안전한 지역: ${safestReason}`,
+        recommendations: [
+          "✓ 가장 안전한 지역입니다",
+          "대기 또는 만남의 장소로 추천합니다",
+          modelJson.guidance.meeting_point || "이동 시 이 방향을 고려하세요"
+        ]
+      });
+    }
+
+    // 최소 5개~최대 8개 유지 (중심 + 주변 + 가장 안전한 곳)
+    const zones = [center, ...extras].slice(0, 8);
+    while (zones.length < 5) zones.push({ ...center, radius: center.radius });
 
     return {
       overallRiskLevel,
       dangerZones: zones,
       safetyTips: (modelJson.guidance.immediate_actions || []).slice(0, 5),
-      analysisTimestamp: modelJson.context?.timestamp_local || new Date().toISOString(),
+      analysisTimestamp:
+        modelJson.context?.timestamp_local || new Date().toISOString(),
     };
   }
 
@@ -412,9 +609,13 @@ class DangerPredictionService {
 
     const safetyTips = [
       "주변을 주의 깊게 살피세요",
-      isNight ? "밝은 곳으로 이동하고 어두운 길은 피하세요" : "사람이 많은 길로 이동하세요",
+      isNight
+        ? "밝은 곳으로 이동하고 어두운 길은 피하세요"
+        : "사람이 많은 길로 이동하세요",
       "비상시 112 (경찰) 또는 119 (구급)에 연락하세요",
-      totalEmergencyFacilities > 0 ? "주변 응급시설 위치를 확인하세요 (🚨 버튼)" : "가까운 안전한 장소를 파악하세요",
+      totalEmergencyFacilities > 0
+        ? "주변 응급시설 위치를 확인하세요 (🚨 버튼)"
+        : "가까운 안전한 장소를 파악하세요",
       "가족이나 친구에게 현재 위치를 공유하세요",
     ];
 
@@ -443,7 +644,7 @@ class DangerPredictionService {
   }
 }
 
-/* ===================== 유틸 ===================== */
+/* ===================== 전역 유틸 ===================== */
 
 function safeJsonParse(s, fallback) {
   try {
@@ -519,7 +720,8 @@ function inferSunState(hour) {
 function offsetLatLng(lat, lng, meters, bearingRad) {
   const R = 6378137; // Earth radius (m)
   const dLat = (meters * Math.cos(bearingRad)) / R;
-  const dLng = (meters * Math.sin(bearingRad)) / (R * Math.cos((lat * Math.PI) / 180));
+  const dLng =
+    (meters * Math.sin(bearingRad)) / (R * Math.cos((lat * Math.PI) / 180));
   return {
     lat: lat + (dLat * 180) / Math.PI,
     lng: lng + (dLng * 180) / Math.PI,
