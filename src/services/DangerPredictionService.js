@@ -1,4 +1,6 @@
 // @ts-nocheck
+// eslint-disable-next-line
+/* eslint-env node */
 const OpenAI = require("openai");
 
 /**
@@ -153,6 +155,10 @@ class DangerPredictionService {
     recentIncidents = [], // [{type, age_hours, distance_m, severity}]
     events = [], // [{name, distance_m, crowd_level}]
     segments = [], // [{from:[lat,lng], to:[lat,lng]}]
+    hasCrimeZoneData = false, // 범죄주의구간 데이터 활성화 여부
+    hasSecurityFacilities = false, // 치안시설 데이터 활성화 여부
+    hasEmergencyBells = false, // 안전비상벨 데이터 활성화 여부
+    hasWomenSafetyData = false, // 여성밤길치안안전 데이터 활성화 여부
   }) {
     if (!process.env.OPENAI_API_KEY) {
       console.warn("OpenAI API key not configured");
@@ -193,6 +199,25 @@ class DangerPredictionService {
       const stationCount = emergencyFacilities.stations?.length || 0;
       const totalEmergencyFacilities =
         hospitalCount + policeCount + stationCount;
+
+      // 각 시설까지의 최단 거리 계산
+      const getClosestDistance = (facilities) => {
+        if (!facilities || facilities.length === 0) return null;
+        const distances = facilities.map(f => {
+          const dist = calculateDistance(
+            currentLocation.lat,
+            currentLocation.lng,
+            f.lat,
+            f.lng
+          );
+          return Math.round(dist);
+        });
+        return Math.min(...distances);
+      };
+
+      const closestHospital = getClosestDistance(emergencyFacilities.hospitals);
+      const closestPolice = getClosestDistance(emergencyFacilities.police);
+      const closestStation = getClosestDistance(emergencyFacilities.stations);
 
       // 내부 메타 스코어(참고용)
       let riskScore = 0;
@@ -285,12 +310,15 @@ class DangerPredictionService {
           hospitals: hospitalCount,
           police: policeCount,
           stations: stationCount,
+          closest_hospital_m: closestHospital,
+          closest_police_m: closestPolice,
+          closest_station_m: closestStation,
         },
       };
 
       console.log("\n====== 모바일 요청 로그 ======");
       console.log(`시간: ${timeOfDay} (${hour}시), ${isWeekend ? '주말' : '평일'}, isNight=${isNight}`);
-      console.log(`응급시설: 병원=${hospitalCount}, 경찰=${policeCount}, 역=${stationCount}, total=${totalEmergencyFacilities}`);
+      console.log(`응급시설: 병원=${hospitalCount}개(${closestHospital ? closestHospital + 'm' : 'N/A'}), 경찰=${policeCount}개(${closestPolice ? closestPolice + 'm' : 'N/A'}), 역=${stationCount}개(${closestStation ? closestStation + 'm' : 'N/A'})`);
       console.log(`조명: sun_state=${userPayload.context.lighting.sun_state}, street_lights=${userPayload.context.lighting.street_lights}`);
       console.log(`교통: foot=${footTraffic}, vehicle=${vehicleTraffic}, cctv=${cctvDensity}`);
 
@@ -311,10 +339,17 @@ class DangerPredictionService {
 위치: 위도 ${Number(currentLocation.lat).toFixed(6)}, 경도 ${Number(
                 currentLocation.lng
               ).toFixed(6)}
-주변 응급시설: 병원 ${hospitalCount}개, 경찰서 ${policeCount}개, 지하철역 ${stationCount}개
+주변 응급시설: 병원 ${hospitalCount}개${closestHospital ? ` (가장 가까운 곳: ${closestHospital}m)` : ''}, 경찰서 ${policeCount}개${closestPolice ? ` (가장 가까운 곳: ${closestPolice}m)` : ''}, 지하철역 ${stationCount}개${closestStation ? ` (가장 가까운 곳: ${closestStation}m)` : ''}
+
+거리 기반 평가 가이드:
+- 경찰서: 200m 이내(매우 안전, -15점), 200-500m(안전, -10점), 500-1000m(보통, -5점), 1000m 이상(위험, +10점)
+- 병원: 300m 이내(안전, -8점), 300-800m(보통, -3점), 800m 이상(주의, +5점)
+- 지하철역: 150m 이내(안전, -10점), 150-400m(보통, -5점), 400m 이상(주의, +3점)
 
 중요: heat.contributors에 반드시 위험도를 높이는 요인(score_delta > 0)과 낮추는 요인(score_delta < 0) 모두 포함하세요.
 예: [{"name": "조명 부족", "score_delta": 15, "rationale": "..."}, {"name": "CCTV 다수", "score_delta": -12, "rationale": "..."}]
+
+${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafetyData ? '\n\n**중요 - 안전지도 데이터 활성화**:\n' + (hasCrimeZoneData ? '- 범죄주의구간(성폭력): 실제 범죄 통계 기반 위험 지역 표시 중. 해당 지역의 위험도를 +15~25 상향 조정하고, 특히 야간에는 더욱 주의 필요. recommendations에 "범죄주의구간 표시 지역입니다. 가능한 우회하세요" 포함.\n' : '') + (hasSecurityFacilities ? '- 치안시설: 경찰서, CCTV 등 치안시설 위치 표시 중. 해당 시설 근처는 안전도가 높으므로 score를 -10~-15 하향 조정. recommendations에 "근처에 치안시설이 있습니다" 포함.\n' : '') + (hasEmergencyBells ? '- 안전비상벨: 비상벨 위치 표시 중. 비상벨 근처는 안전도가 높으므로 score를 -8~-12 하향 조정. recommendations에 "근처에 안전비상벨이 있습니다" 포함.\n' : '') + (hasWomenSafetyData ? '- 여성밤길치안안전: 여성 야간 안전 취약 지역 표시 중. 해당 지역의 위험도를 +10~20 상향 조정, 특히 야간 시간대에 더욱 주의. recommendations에 "여성 야간 취약 지역입니다. 밝은 곳으로 이동하세요" 포함.\n' : '') + '\n이 데이터들을 종합하여 위험도를 정확하게 평가하세요.' : ''}
 
 ` + JSON.stringify(userPayload),
           },
@@ -779,6 +814,21 @@ function offsetLatLng(lat, lng, meters, bearingRad) {
     lat: lat + (dLat * 180) / Math.PI,
     lng: lng + (dLng * 180) / Math.PI,
   };
+}
+
+// 두 좌표 간 거리 계산 (Haversine formula, 미터 단위)
+function calculateDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371000; // Earth radius in meters
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 module.exports = DangerPredictionService;
