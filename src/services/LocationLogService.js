@@ -12,7 +12,8 @@ class LocationLogService {
       return;
     }
 
-    const interval = setInterval(async () => {
+    // 추적 시작 시 즉시 로그 저장
+    const logLocation = async () => {
       const location = getCurrentLocation();
       if (location && location.lat && location.lng) {
         try {
@@ -22,7 +23,11 @@ class LocationLogService {
           console.error(`위치 로그 저장 실패 (${userId}):`, error);
         }
       }
-    }, 30000);
+    };
+
+    logLocation(); // 즉시 실행
+
+    const interval = setInterval(logLocation, 30000); // 30초마다 실행
 
     this.trackingIntervals.set(userId, interval);
   }
