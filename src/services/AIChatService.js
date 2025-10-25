@@ -193,16 +193,17 @@ class AIChatService {
           {
             role: "system",
             content:
-              "당신은 응급상황 대처 전문가입니다. 밤길 안전, 응급상황 대처, 범죄 예방 등에 대한 실용적이고 구체적인 상식을 한국어로 제공해주세요. 반드시 한국어로만 답변하세요. 제목과 내용을 JSON 형식으로 반환해주세요.",
+              "You are an emergency response expert. Provide practical safety tips in KOREAN language ONLY. All responses must be in Korean. Return JSON format with title and content fields.",
           },
           {
             role: "user",
             content:
-              '응급상황에서 도움이 되는 실용적인 상식 하나를 한국어로 알려주세요. 제목과 내용을 포함해서 {"title": "제목", "content": "내용"} 형식으로 주세요. 내용은 2-3문장으로 간결하게 작성해주세요. 반드시 한국어로만 답변하세요.',
+              '한국어로 응급상황 대처 팁을 제공하세요. JSON 형식: {"title": "한국어 제목", "content": "한국어 내용 2-3문장"}. 모든 텍스트는 한국어로만 작성하세요.',
           },
         ],
+        response_format: { type: "json_object" },
         max_tokens: 300,
-        temperature: 0.8,
+        temperature: 0.7,
       });
 
       const response = completion.choices[0].message.content;
