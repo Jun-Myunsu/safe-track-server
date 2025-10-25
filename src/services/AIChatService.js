@@ -48,7 +48,8 @@ class AIChatService {
 3. 위치 정보가 있으면 구체적인 지역 정보를 제공하세요
 4. 확실하지 않은 정보는 일반적인 조언을 제공하세요
 5. 한국 지역이면 한국어 지명과 시설명을 사용하세요
-6. 질문의 범위를 제한하지 말고 다양한 주제에 답변하세요`;
+6. 질문의 범위를 제한하지 말고 다양한 주제에 답변하세요
+7. 답변은 200자 이내로 간결하게 작성하세요`;
 
       if (location) {
         systemContent += `\n\n사용자의 현재 위치: 위도 ${location.lat.toFixed(
@@ -72,7 +73,7 @@ class AIChatService {
       const completion = await this.openai.chat.completions.create({
         model: "gpt-4",
         messages,
-        max_tokens: 500,
+        max_tokens: 300,
         temperature: 0.7,
       });
 
@@ -193,29 +194,25 @@ class AIChatService {
           {
             role: "system",
             content:
-              "You are an emergency response expert. Provide practical safety tips in KOREAN language ONLY. All responses must be in Korean. Return JSON format with title and content fields.",
+              "You are an emergency response expert. Provide practical safety tips in KOREAN language ONLY. All responses must be in Korean.",
           },
           {
             role: "user",
             content:
-              '한국어로 응급상황 대처 팁을 제공하세요. JSON 형식: {"title": "한국어 제목", "content": "한국어 내용 2-3문장"}. 모든 텍스트는 한국어로만 작성하세요.',
+              '한국어로 응급상황 대처 팁을 제공하세요. 제목 1줄과 본문은 3-5문장으로 구체적이고 실용적으로 작성해주세요. 완전한 문장으로 끝내주세요.',
           },
         ],
-        response_format: { type: "json_object" },
-        max_tokens: 300,
+        max_tokens: 500,
         temperature: 0.7,
       });
 
       const response = completion.choices[0].message.content;
-
-      try {
-        return JSON.parse(response);
-      } catch {
-        return {
-          title: "응급상황 대처법",
-          content: response,
-        };
-      }
+      const lines = response.split('\n').filter(line => line.trim());
+      
+      return {
+        title: lines[0] || "응급상황 대처법",
+        content: lines.slice(1).join('\n') || response,
+      };
     } catch (error) {
       console.error("OpenAI API 오류:", error);
       return {
