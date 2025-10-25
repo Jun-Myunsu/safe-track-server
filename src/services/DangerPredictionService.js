@@ -289,8 +289,8 @@ class DangerPredictionService {
       };
 
       console.log("\n====== 모바일 요청 로그 ======");
-      console.log(`시간: ${timeOfDay} (${hour}시), ${isWeekend ? '주말' : '평일'}`);
-      console.log(`응급시설: 병원=${hospitalCount}, 경찰=${policeCount}, 역=${stationCount}`);
+      console.log(`시간: ${timeOfDay} (${hour}시), ${isWeekend ? '주말' : '평일'}, isNight=${isNight}`);
+      console.log(`응급시설: 병원=${hospitalCount}, 경찰=${policeCount}, 역=${stationCount}, total=${totalEmergencyFacilities}`);
       console.log(`조명: sun_state=${userPayload.context.lighting.sun_state}, street_lights=${userPayload.context.lighting.street_lights}`);
       console.log(`교통: foot=${footTraffic}, vehicle=${vehicleTraffic}, cctv=${cctvDensity}`);
 
@@ -332,7 +332,14 @@ class DangerPredictionService {
       const modelJson = safeJsonParse(raw, {});
 
       console.log(`\nAI 원본 응답: score=${modelJson.risk?.score}, level=${modelJson.risk?.level}, confidence=${modelJson.risk?.confidence}`);
-      console.log(`data_gaps: ${modelJson.risk?.data_gaps?.join(', ') || 'none'}`);
+      console.log(`data_gaps(${modelJson.risk?.data_gaps?.length || 0}개): ${modelJson.risk?.data_gaps?.join(', ') || 'none'}`);
+      
+      // 기본 점수 계산 (참고용)
+      let expectedBase = 0;
+      if (isNight) expectedBase += 25;
+      if (totalEmergencyFacilities === 0) expectedBase += 20;
+      else if (totalEmergencyFacilities === 1) expectedBase += 10;
+      console.log(`예상 기본 점수: ${expectedBase}`);
 
       // ====== 최소 스키마 검증(간단) ======
       const ok = this.validateModelSchema(modelJson);
@@ -346,7 +353,7 @@ class DangerPredictionService {
       this.enforceLevelByScore(modelJson); // 점수→레벨 강제
       console.log(`보정 1 (enforceLevelByScore): score=${modelJson.risk.score}, level=${modelJson.risk.level}`);
       
-      this.downgradeOnLowConfidence(modelJson); // 신뢰도/데이터결핍 하향 캡
+      this.downgradeOnLowConfidence(modelJson, userPayload); // 신뢰도/데이터결핍 하향 캡
       console.log(`보정 2 (downgradeOnLowConfidence): score=${modelJson.risk.score}, level=${modelJson.risk.level}`);
       
       this.applyContextualCaps(userPayload, modelJson); // 안전 시그널 기반 상한
@@ -359,6 +366,7 @@ class DangerPredictionService {
 
       console.log(`\n최종 결과: overallRiskLevel=${legacy.overallRiskLevel}, zones=${legacy.dangerZones.length}개`);
       console.log(`Zone levels: ${legacy.dangerZones.map(z => z.riskLevel).join(', ')}`);
+      console.log(`최종 점수: ${modelJson.risk.score}`);
       console.log("============================\n");
 
       return {
@@ -403,29 +411,46 @@ class DangerPredictionService {
   }
 
   // 신뢰도 낮거나 데이터 결핍 많으면 하향 보정 + CRITICAL 캡
-  downgradeOnLowConfidence(modelJson) {
+  downgradeOnLowConfidence(modelJson, userPayload) {
     const conf = Number(modelJson?.risk?.confidence ?? 0.5);
     const gaps = Array.isArray(modelJson?.risk?.data_gaps)
       ? modelJson.risk.data_gaps.length
       : 0;
 
-    if (conf < 0.6 || gaps >= 2) {
-      // 데이터 결핍이 많으면 더 공격적으로 하향 (결핍*8 + (0.6-conf)*25)
+    // 시간대와 응급시설 기반 기본 점수 계산
+    const facilities = userPayload.emergency_facilities || {};
+    const totalFacilities = (facilities.hospitals || 0) + (facilities.police || 0) + (facilities.stations || 0);
+    const lighting = userPayload.context?.lighting || {};
+    const isNight = lighting.sun_state === "night";
+    
+    // 기본 점수: 시간대 + 응급시설
+    let baseScore = 0;
+    if (isNight) baseScore += 25; // 심야
+    else if (lighting.sun_state === "nautical_twilight") baseScore += 15;
+    else if (lighting.sun_state === "civil_twilight") baseScore += 10;
+    
+    if (totalFacilities === 0) baseScore += 20;
+    else if (totalFacilities === 1) baseScore += 10;
+    else if (totalFacilities === 2) baseScore += 5;
+    
+    // 데이터 결핍이 많으면 기본 점수 사용
+    if (gaps >= 4) {
+      modelJson.risk.score = baseScore;
+      modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
+    } else if (conf < 0.6 || gaps >= 2) {
+      // 일부 결핍이면 패널티 적용
       const penalty = gaps * 8 + (0.6 - conf) * 25;
       modelJson.risk.score = Math.max(
-        0,
+        baseScore,
         modelJson.risk.score - Math.max(0, penalty)
       );
       modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
-      
-      // CRITICAL/HIGH를 MEDIUM 이하로 제한 (데이터 부족 시)
-      if (gaps >= 4 && modelJson.risk.level !== "LOW") {
-        modelJson.risk.score = Math.min(modelJson.risk.score, 35);
-        modelJson.risk.level = this.levelFromScore(modelJson.risk.score);
-      } else if (modelJson.risk.level === "CRITICAL") {
-        modelJson.risk.level = "HIGH";
-        modelJson.risk.score = Math.min(modelJson.risk.score, 74);
-      }
+    }
+    
+    // CRITICAL 방지
+    if (modelJson.risk.level === "CRITICAL") {
+      modelJson.risk.level = "HIGH";
+      modelJson.risk.score = Math.min(modelJson.risk.score, 74);
     }
   }
 
