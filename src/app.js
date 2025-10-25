@@ -78,10 +78,11 @@ class SafeTrackServer {
         res.json(tip);
       } catch (error) {
         console.error("응급 상식 생성 실패:", error.message || error);
-        res.status(500).json({ 
+        res.status(500).json({
           error: "응급 상식을 불러올 수 없습니다",
           title: "긴급 연락처",
-          content: "응급상황 시 112(경찰), 119(소방/구급), 1366(여성 긴급전화)로 연락하세요."
+          content:
+            "응급상황 시 112(경찰), 119(소방/구급), 1366(여성 긴급전화)로 연락하세요.",
         });
       }
     });
@@ -95,10 +96,10 @@ class SafeTrackServer {
         res.json({ success: true, data: stuckUsers });
       } catch (error) {
         console.error("정체 사용자 조회 실패:", error);
-        res.status(500).json({ 
+        res.status(500).json({
           success: false,
           error: error.message || "정체 사용자 조회 실패",
-          data: []
+          data: [],
         });
       }
     });
@@ -107,15 +108,17 @@ class SafeTrackServer {
       try {
         const userId = req.params.userId;
         if (!userId) {
-          return res.status(400).json({ success: false, error: "userId가 필요합니다" });
+          return res
+            .status(400)
+            .json({ success: false, error: "userId가 필요합니다" });
         }
         await LocationLog.deleteStuckUser(userId);
         res.json({ success: true });
       } catch (error) {
         console.error("정체 사용자 삭제 실패:", error.message || error);
-        res.status(500).json({ 
+        res.status(500).json({
           success: false,
-          error: "정체 사용자 삭제 실패" 
+          error: "정체 사용자 삭제 실패",
         });
       }
     });
@@ -128,7 +131,10 @@ class SafeTrackServer {
     try {
       this.userService = new UserService();
       this.locationService = new LocationService();
-      this.chatService = new ChatService(this.locationService, this.userService);
+      this.chatService = new ChatService(
+        this.locationService,
+        this.userService
+      );
       this.aiChatService = new AIChatService();
       this.dangerPredictionService = new DangerPredictionService();
       this.locationLogService = new LocationLogService(this.io);
