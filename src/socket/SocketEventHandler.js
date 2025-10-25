@@ -126,16 +126,36 @@ class SocketEventHandler {
    */
   registerLocationEvents(socket) {
     const { locationController } = this.controllers;
+    const { locationService, locationLogService } = this.services;
 
-    socket.on('startTracking', (data) =>
-      locationController.handleStartTracking(socket, data)
-    );
-    socket.on('locationUpdate', (data) =>
-      locationController.handleLocationUpdate(socket, data)
-    );
-    socket.on('stopTracking', (data) =>
-      locationController.handleStopTracking(socket, data)
-    );
+    socket.on('startTracking', (data) => {
+      try {
+        locationController.handleStartTracking(socket, data);
+        if (data.userId) {
+          locationLogService.startTracking(data.userId, () => {
+            const location = locationService.getLocation(data.userId);
+            return location || null;
+          });
+        }
+      } catch (error) {
+        console.error('위치 추적 시작 실패:', error);
+        socket.emit('error', { message: '위치 추적 시작 실패' });
+      }
+    });
+    socket.on('locationUpdate', (data) => {
+      locationController.handleLocationUpdate(socket, data);
+    });
+    socket.on('stopTracking', async (data) => {
+      try {
+        locationController.handleStopTracking(socket, data);
+        if (data.userId) {
+          await locationLogService.stopTracking(data.userId);
+        }
+      } catch (error) {
+        console.error('위치 추적 중지 실패:', error);
+        socket.emit('error', { message: '위치 추적 중지 실패' });
+      }
+    });
     socket.on('requestLocationShare', (data) =>
       locationController.handleRequestLocationShare(socket, data)
     );
@@ -221,33 +241,38 @@ class SocketEventHandler {
   /**
    * 연결 해제 처리
    */
-  handleDisconnect(socket) {
-    const { userService, locationService } = this.services;
+  async handleDisconnect(socket) {
+    try {
+      const { userService, locationService, locationLogService } = this.services;
 
-    if (!socket.userId) {
-      return;
+      if (!socket.userId) {
+        return;
+      }
+
+      const user = userService.getOnlineUser(socket.userId);
+      if (!user || user.socketId !== socket.id) {
+        return;
+      }
+
+      // 사용자 추적 중지 및 정리
+      userService.setUserTracking(socket.userId, false);
+      locationService.removeLocation(socket.userId);
+      await locationLogService.stopTracking(socket.userId);
+      userService.removeOnlineUser(socket.userId);
+
+      // 추적 상태 업데이트 브로드캐스트
+      this.io.emit('trackingStatusUpdate', {
+        userId: socket.userId,
+        isTracking: false
+      });
+
+      // 사용자 목록 업데이트 (약간의 지연 후)
+      setTimeout(() => {
+        this.io.emit('userList', userService.getAllOnlineUsers());
+      }, 1000);
+    } catch (error) {
+      console.error('연결 해제 처리 실패:', error);
     }
-
-    const user = userService.getOnlineUser(socket.userId);
-    if (!user || user.socketId !== socket.id) {
-      return;
-    }
-
-    // 사용자 추적 중지 및 정리
-    userService.setUserTracking(socket.userId, false);
-    locationService.removeLocation(socket.userId);
-    userService.removeOnlineUser(socket.userId);
-
-    // 추적 상태 업데이트 브로드캐스트
-    this.io.emit('trackingStatusUpdate', {
-      userId: socket.userId,
-      isTracking: false
-    });
-
-    // 사용자 목록 업데이트 (약간의 지연 후)
-    setTimeout(() => {
-      this.io.emit('userList', userService.getAllOnlineUsers());
-    }, 1000);
   }
 }
 

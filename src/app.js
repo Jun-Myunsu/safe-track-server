@@ -1,33 +1,36 @@
-require('dotenv').config();
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
+require("dotenv").config();
+const express = require("express");
+const http = require("http");
+const socketIo = require("socket.io");
 
-const config = require('./config/server');
-const { initDatabase } = require('./utils/database');
-const Session = require('./models/Session');
-const { configureExpressMiddleware } = require('./middleware/expressConfig');
-const { SERVER_URLS, LOG_MESSAGES } = require('./constants/app');
+const config = require("./config/server");
+const { initDatabase } = require("./utils/database");
+const Session = require("./models/Session");
+const LocationLog = require("./models/LocationLog");
+const { configureExpressMiddleware } = require("./middleware/expressConfig");
+const { validateCsrfToken } = require("./middleware/csrf");
+const { SERVER_URLS, LOG_MESSAGES } = require("./constants/app");
 
 // Services
-const UserService = require('./services/UserService');
-const LocationService = require('./services/LocationService');
-const ChatService = require('./services/ChatService');
-const KeepAliveService = require('./services/KeepAliveService');
-const AIChatService = require('./services/AIChatService');
-const DangerPredictionService = require('./services/DangerPredictionService');
+const UserService = require("./services/UserService");
+const LocationService = require("./services/LocationService");
+const ChatService = require("./services/ChatService");
+const KeepAliveService = require("./services/KeepAliveService");
+const AIChatService = require("./services/AIChatService");
+const DangerPredictionService = require("./services/DangerPredictionService");
+const LocationLogService = require("./services/LocationLogService");
 
 // Controllers
-const AuthController = require('./controllers/AuthController');
-const LocationController = require('./controllers/LocationController');
-const UserController = require('./controllers/UserController');
-const ChatController = require('./controllers/ChatController');
-const AIChatController = require('./controllers/AIChatController');
-const SettingsController = require('./controllers/SettingsController');
-const DangerPredictionController = require('./controllers/DangerPredictionController');
+const AuthController = require("./controllers/AuthController");
+const LocationController = require("./controllers/LocationController");
+const UserController = require("./controllers/UserController");
+const ChatController = require("./controllers/ChatController");
+const AIChatController = require("./controllers/AIChatController");
+const SettingsController = require("./controllers/SettingsController");
+const DangerPredictionController = require("./controllers/DangerPredictionController");
 
 // Socket Handler
-const SocketEventHandler = require('./socket/SocketEventHandler');
+const SocketEventHandler = require("./socket/SocketEventHandler");
 
 /**
  * Safe Track 서버 애플리케이션
@@ -40,8 +43,8 @@ class SafeTrackServer {
     this.io = socketIo(this.server, { cors: config.cors });
 
     this.initializeMiddleware();
-    this.setupRoutes();
     this.initializeServices();
+    this.setupRoutes();
     this.initializeControllers();
     this.setupSocketIO();
     this.startBackgroundTasks();
@@ -58,22 +61,62 @@ class SafeTrackServer {
    * HTTP 라우트 설정
    */
   setupRoutes() {
-    this.app.get('/ping', (_req, res) => {
+    this.app.get("/ping", (_req, res) => {
       res.json({
-        status: 'alive',
+        status: "alive",
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        onlineUsers: this.userService ? this.userService.getOnlineUserCount() : 0
+        onlineUsers: this.userService
+          ? this.userService.getOnlineUserCount()
+          : 0,
       });
     });
 
-    this.app.post('/api/emergency-tip', async (_req, res) => {
+    this.app.post("/api/emergency-tip", async (_req, res) => {
       try {
         const tip = await this.aiChatService.generateEmergencyTip();
         res.json(tip);
       } catch (error) {
-        console.error('응급 상식 생성 실패:', error);
-        res.status(500).json({ error: '응급 상식을 불러올 수 없습니다' });
+        console.error("응급 상식 생성 실패:", error.message || error);
+        res.status(500).json({ 
+          error: "응급 상식을 불러올 수 없습니다",
+          title: "긴급 연락처",
+          content: "응급상황 시 112(경찰), 119(소방/구급), 1366(여성 긴급전화)로 연락하세요."
+        });
+      }
+    });
+
+    this.app.get("/api/admin/stuck-users", async (_req, res) => {
+      try {
+        const stuckUsers = await LocationLog.getAllStuckUsers();
+        if (!stuckUsers) {
+          return res.json({ success: true, data: [] });
+        }
+        res.json({ success: true, data: stuckUsers });
+      } catch (error) {
+        console.error("정체 사용자 조회 실패:", error);
+        res.status(500).json({ 
+          success: false,
+          error: error.message || "정체 사용자 조회 실패",
+          data: []
+        });
+      }
+    });
+
+    this.app.delete("/api/admin/stuck-users/:userId", async (req, res) => {
+      try {
+        const userId = req.params.userId;
+        if (!userId) {
+          return res.status(400).json({ success: false, error: "userId가 필요합니다" });
+        }
+        await LocationLog.deleteStuckUser(userId);
+        res.json({ success: true });
+      } catch (error) {
+        console.error("정체 사용자 삭제 실패:", error.message || error);
+        res.status(500).json({ 
+          success: false,
+          error: "정체 사용자 삭제 실패" 
+        });
       }
     });
   }
@@ -82,22 +125,33 @@ class SafeTrackServer {
    * 서비스 레이어 초기화
    */
   initializeServices() {
-    this.userService = new UserService();
-    this.locationService = new LocationService();
-    this.chatService = new ChatService(this.locationService, this.userService);
-    this.aiChatService = new AIChatService();
-    this.dangerPredictionService = new DangerPredictionService();
+    try {
+      this.userService = new UserService();
+      this.locationService = new LocationService();
+      this.chatService = new ChatService(this.locationService, this.userService);
+      this.aiChatService = new AIChatService();
+      this.dangerPredictionService = new DangerPredictionService();
+      this.locationLogService = new LocationLogService(this.io);
 
-    // Keep-alive 서비스 초기화
-    const serverUrl = process.env.RENDER_EXTERNAL_URL || SERVER_URLS.DEFAULT_RENDER_URL;
-    this.keepAliveService = new KeepAliveService(serverUrl, 5);
+      // Keep-alive 서비스 초기화
+      const serverUrl =
+        process.env.RENDER_EXTERNAL_URL || SERVER_URLS.DEFAULT_RENDER_URL;
+      this.keepAliveService = new KeepAliveService(serverUrl, 5);
+    } catch (error) {
+      console.error("서비스 초기화 실패:", error);
+      throw error;
+    }
   }
 
   /**
    * 컨트롤러 레이어 초기화
    */
   initializeControllers() {
-    this.authController = new AuthController(this.userService, this.locationService, this.io);
+    this.authController = new AuthController(
+      this.userService,
+      this.locationService,
+      this.io
+    );
     this.locationController = new LocationController(
       this.userService,
       this.locationService,
@@ -109,9 +163,15 @@ class SafeTrackServer {
       this.userService,
       this.io
     );
-    this.aiChatController = new AIChatController(this.aiChatService, this.userService, this.io);
+    this.aiChatController = new AIChatController(
+      this.aiChatService,
+      this.userService,
+      this.io
+    );
     this.settingsController = new SettingsController();
-    this.dangerPredictionController = new DangerPredictionController(this.dangerPredictionService);
+    this.dangerPredictionController = new DangerPredictionController(
+      this.dangerPredictionService
+    );
 
     // HTTP 라우트 설정
     this.dangerPredictionController.setupRoutes(this.app);
@@ -135,9 +195,14 @@ class SafeTrackServer {
       locationService: this.locationService,
       chatService: this.chatService,
       aiChatService: this.aiChatService,
+      locationLogService: this.locationLogService,
     };
 
-    this.socketEventHandler = new SocketEventHandler(this.io, controllers, services);
+    this.socketEventHandler = new SocketEventHandler(
+      this.io,
+      controllers,
+      services
+    );
     this.socketEventHandler.initialize();
   }
 
@@ -147,6 +212,7 @@ class SafeTrackServer {
   startBackgroundTasks() {
     this.startSessionCleanup();
     this.keepAliveService.start();
+    this.locationLogService.startStuckUserCheck();
   }
 
   /**
@@ -163,8 +229,9 @@ class SafeTrackServer {
    */
   async start() {
     await initDatabase();
+    await LocationLog.createTable();
 
-    this.server.listen(config.port, '0.0.0.0', () => {
+    this.server.listen(config.port, "0.0.0.0", () => {
       console.log(`${LOG_MESSAGES.SERVER_STARTED} ${config.port}`);
     });
   }
@@ -173,13 +240,13 @@ class SafeTrackServer {
    * 서버 종료 (Graceful shutdown)
    */
   async shutdown() {
-    console.log('서버 종료 시작...');
+    console.log("서버 종료 시작...");
 
     this.keepAliveService.stop();
 
     return new Promise((resolve) => {
       this.server.close(() => {
-        console.log('서버가 안전하게 종료되었습니다.');
+        console.log("서버가 안전하게 종료되었습니다.");
         resolve();
       });
     });
