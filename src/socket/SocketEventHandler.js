@@ -254,22 +254,54 @@ class SocketEventHandler {
         return;
       }
 
-      // 사용자 추적 중지 및 정리
-      userService.setUserTracking(socket.userId, false);
-      locationService.removeLocation(socket.userId);
-      await locationLogService.stopTracking(socket.userId);
-      userService.removeOnlineUser(socket.userId);
+      const disconnectedUserId = socket.userId;
 
-      // 추적 상태 업데이트 브로드캐스트
+      // 1. 공유 상태 정리: 내가 공유하고 있던 사용자들에게 알림
+      const sharedUsers = locationService.getSharedUsers(disconnectedUserId);
+      if (sharedUsers && sharedUsers.size > 0) {
+        sharedUsers.forEach(targetUserId => {
+          const targetUser = userService.getOnlineUser(targetUserId);
+          if (targetUser) {
+            this.io.to(targetUser.socketId).emit('locationShareStopped', {
+              fromUserId: disconnectedUserId,
+              fromName: disconnectedUserId
+            });
+            this.io.to(targetUser.socketId).emit('locationRemoved', {
+              userId: disconnectedUserId
+            });
+          }
+          // 권한 제거
+          locationService.stopLocationShare(disconnectedUserId, targetUserId);
+        });
+      }
+
+      // 2. 공유 상태 정리: 나에게 공유하고 있던 사용자들의 권한 제거
+      const allOnlineUsers = userService.getAllOnlineUsers();
+      allOnlineUsers.forEach(otherUser => {
+        const otherSharedUsers = locationService.getSharedUsers(otherUser.id);
+        if (otherSharedUsers && otherSharedUsers.has(disconnectedUserId)) {
+          locationService.stopLocationShare(otherUser.id, disconnectedUserId);
+        }
+      });
+
+      // 3. 사용자 추적 중지 및 정리
+      userService.setUserTracking(disconnectedUserId, false);
+      locationService.removeLocation(disconnectedUserId);
+      await locationLogService.stopTracking(disconnectedUserId);
+      userService.removeOnlineUser(disconnectedUserId);
+
+      // 4. 추적 상태 업데이트 브로드캐스트
       this.io.emit('trackingStatusUpdate', {
-        userId: socket.userId,
+        userId: disconnectedUserId,
         isTracking: false
       });
 
-      // 사용자 목록 업데이트 (약간의 지연 후)
+      // 5. 사용자 목록 업데이트 (약간의 지연 후)
       setTimeout(() => {
         this.io.emit('userList', userService.getAllOnlineUsers());
       }, 1000);
+
+      console.log(`✅ 사용자 연결 해제 및 공유 상태 정리 완료: ${disconnectedUserId}`);
     } catch (error) {
       console.error('연결 해제 처리 실패:', error);
     }

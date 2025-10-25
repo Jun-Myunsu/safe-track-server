@@ -45,8 +45,20 @@ class LocationController {
     const numericLat = Number(lat);
     const numericLng = Number(lng);
 
+    // 좌표 타입 검증
     if (!Number.isFinite(numericLat) || !Number.isFinite(numericLng)) {
       socket.emit('locationUpdateError', { message: '잘못된 위치 좌표입니다.' });
+      return;
+    }
+
+    // 좌표 범위 검증 (위도: -90~90, 경도: -180~180)
+    if (numericLat < -90 || numericLat > 90) {
+      socket.emit('locationUpdateError', { message: '위도는 -90~90 범위여야 합니다.' });
+      return;
+    }
+
+    if (numericLng < -180 || numericLng > 180) {
+      socket.emit('locationUpdateError', { message: '경도는 -180~180 범위여야 합니다.' });
       return;
     }
 
@@ -65,15 +77,26 @@ class LocationController {
     const allowedUsers = this.locationService.getAllowedUsers(socketUserId);
 
     allowedUsers.forEach((targetUserId) => {
-      const targetUser = this.userService.getOnlineUser(targetUserId);
-      if (targetUser) {
-        this.io.to(targetUser.socketId).emit('locationReceived', {
-          userId: socketUserId,
-          lat: numericLat,
-          lng: numericLng,
-          timestamp: locationData.timestamp,
-          path: history.map((h) => [h.lat, h.lng])
-        });
+      try {
+        const targetUser = this.userService.getOnlineUser(targetUserId);
+        if (targetUser && targetUser.socketId) {
+          // 소켓이 여전히 연결되어 있는지 확인
+          const targetSocket = this.io.sockets.sockets.get(targetUser.socketId);
+          if (targetSocket && targetSocket.connected) {
+            this.io.to(targetUser.socketId).emit('locationReceived', {
+              userId: socketUserId,
+              lat: numericLat,
+              lng: numericLng,
+              timestamp: locationData.timestamp,
+              path: history.map((h) => [h.lat, h.lng])
+            });
+          } else {
+            // 소켓 연결이 끊어진 경우 권한 유지 (재연결 대기)
+            console.warn(`소켓 연결 끊어짐: ${targetUserId}, 권한 유지 중`);
+          }
+        }
+      } catch (error) {
+        console.error(`위치 전송 실패 (${targetUserId}):`, error);
       }
     });
   }
