@@ -31,11 +31,13 @@ class ChatService {
     // 나에게 공유 중인 사용자들
     const allUsers = this.userService.getAllOnlineUsers();
     allUsers.forEach(user => {
-      const theirShares = this.locationService.getSharedUsers(user.userId);
-      if (theirShares.has(fromUserId) && this.userService.getOnlineUser(user.userId)) {
-        connectedUsers.add(user.userId);
+      const theirShares = this.locationService.getSharedUsers(user.id);
+      if (theirShares.has(fromUserId) && this.userService.getOnlineUser(user.id)) {
+        connectedUsers.add(user.id);
       }
     });
+
+    connectedUsers.delete(fromUserId);
 
     return Array.from(connectedUsers);
   }

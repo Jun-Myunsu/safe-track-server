@@ -15,6 +15,7 @@ const LocationService = require('./services/LocationService');
 const ChatService = require('./services/ChatService');
 const KeepAliveService = require('./services/KeepAliveService');
 const AIChatService = require('./services/AIChatService');
+const DangerPredictionService = require('./services/DangerPredictionService');
 
 // Controllers
 const AuthController = require('./controllers/AuthController');
@@ -23,6 +24,7 @@ const UserController = require('./controllers/UserController');
 const ChatController = require('./controllers/ChatController');
 const AIChatController = require('./controllers/AIChatController');
 const SettingsController = require('./controllers/SettingsController');
+const DangerPredictionController = require('./controllers/DangerPredictionController');
 
 // Socket Handler
 const SocketEventHandler = require('./socket/SocketEventHandler');
@@ -84,6 +86,7 @@ class SafeTrackServer {
     this.locationService = new LocationService();
     this.chatService = new ChatService(this.locationService, this.userService);
     this.aiChatService = new AIChatService();
+    this.dangerPredictionService = new DangerPredictionService();
 
     // Keep-alive 서비스 초기화
     const serverUrl = process.env.RENDER_EXTERNAL_URL || SERVER_URLS.DEFAULT_RENDER_URL;
@@ -108,6 +111,10 @@ class SafeTrackServer {
     );
     this.aiChatController = new AIChatController(this.aiChatService, this.userService, this.io);
     this.settingsController = new SettingsController();
+    this.dangerPredictionController = new DangerPredictionController(this.dangerPredictionService);
+
+    // HTTP 라우트 설정
+    this.dangerPredictionController.setupRoutes(this.app);
   }
 
   /**

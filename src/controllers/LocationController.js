@@ -7,152 +7,199 @@ class LocationController {
     this.io = io;
   }
 
-  handleStartTracking(socket, data) {
-    const { userId } = data;
-    const user = this.userService.getOnlineUser(userId);
-    
-    if (!user) {
-      socket.emit('trackingError', { message: '사용자를 찾을 수 없습니다' });
+  handleStartTracking(socket, data = {}) {
+    const socketUserId = socket.userId;
+    const requestedUserId = data.userId;
+
+    if (!socketUserId) {
+      socket.emit('trackingError', { message: '인증되지 않은 요청입니다.' });
       return;
     }
-    
-    this.userService.setUserTracking(userId, true);
-    socket.emit('trackingStarted', { userId });
-    this.io.emit('trackingStatusUpdate', { userId, isTracking: true });
-    
-    console.log(`위치 추적 시작: ${userId}`);
+
+    if (requestedUserId && requestedUserId !== socketUserId) {
+      socket.emit('trackingError', { message: '본인 위치만 추적할 수 있습니다.' });
+      return;
+    }
+
+    const user = this.userService.getOnlineUser(socketUserId);
+    if (!user) {
+      socket.emit('trackingError', { message: '사용자를 찾을 수 없습니다.' });
+      return;
+    }
+
+    this.userService.setUserTracking(socketUserId, true);
+    socket.emit('trackingStarted', { userId: socketUserId });
+    this.io.emit('trackingStatusUpdate', { userId: socketUserId, isTracking: true });
+
+    console.log(`위치 추적 시작: ${socketUserId}`);
   }
 
-  handleLocationUpdate(socket, data) {
-    const { userId, lat, lng } = data;
-    const user = this.userService.getOnlineUser(userId);
-    
-    // 추적 중인 사용자만 위치 업데이트 허용
-    if (!user || !user.isTracking) {
-      socket.emit('locationUpdateError', { message: '위치 추적이 비활성화되어 있습니다' });
+  handleLocationUpdate(socket, data = {}) {
+    const socketUserId = socket.userId;
+    if (!socketUserId) {
+      socket.emit('locationUpdateError', { message: '인증되지 않은 요청입니다.' });
       return;
     }
-    
-    const { locationData, history } = this.locationService.updateLocation(userId, lat, lng);
-    
-    const allowedUsers = this.locationService.getAllowedUsers(userId);
-    
-    allowedUsers.forEach(targetUserId => {
+
+    const { lat, lng } = data;
+    const numericLat = Number(lat);
+    const numericLng = Number(lng);
+
+    if (!Number.isFinite(numericLat) || !Number.isFinite(numericLng)) {
+      socket.emit('locationUpdateError', { message: '잘못된 위치 좌표입니다.' });
+      return;
+    }
+
+    const user = this.userService.getOnlineUser(socketUserId);
+    if (!user || !user.isTracking) {
+      socket.emit('locationUpdateError', { message: '위치 추적이 활성화되어 있지 않습니다.' });
+      return;
+    }
+
+    const { locationData, history } = this.locationService.updateLocation(
+      socketUserId,
+      numericLat,
+      numericLng
+    );
+
+    const allowedUsers = this.locationService.getAllowedUsers(socketUserId);
+
+    allowedUsers.forEach((targetUserId) => {
       const targetUser = this.userService.getOnlineUser(targetUserId);
       if (targetUser) {
-        this.io.to(targetUser.socketId).emit('locationReceived', { 
-          userId, 
-          lat, 
-          lng, 
+        this.io.to(targetUser.socketId).emit('locationReceived', {
+          userId: socketUserId,
+          lat: numericLat,
+          lng: numericLng,
           timestamp: locationData.timestamp,
-          path: history.map(h => [h.lat, h.lng])
+          path: history.map((h) => [h.lat, h.lng])
         });
       }
     });
   }
 
-  handleStopTracking(socket, data) {
-    const { userId } = data;
-    const user = this.userService.getOnlineUser(userId);
-    
-    if (!user) {
-      socket.emit('trackingError', { message: '사용자를 찾을 수 없습니다' });
+  handleStopTracking(socket, data = {}) {
+    const socketUserId = socket.userId;
+    const requestedUserId = data.userId;
+
+    if (!socketUserId) {
+      socket.emit('trackingError', { message: '인증되지 않은 요청입니다.' });
       return;
     }
-    
-    this.userService.setUserTracking(userId, false);
-    this.locationService.removeLocation(userId);
-    socket.emit('trackingStopped', { userId });
-    this.io.emit('trackingStatusUpdate', { userId, isTracking: false });
-    
-    console.log(`위치 추적 중지: ${userId}`);
+
+    if (requestedUserId && requestedUserId !== socketUserId) {
+      socket.emit('trackingError', { message: '본인 위치만 중단할 수 있습니다.' });
+      return;
+    }
+
+    const user = this.userService.getOnlineUser(socketUserId);
+    if (!user) {
+      socket.emit('trackingError', { message: '사용자를 찾을 수 없습니다.' });
+      return;
+    }
+
+    this.userService.setUserTracking(socketUserId, false);
+    this.locationService.removeLocation(socketUserId);
+    socket.emit('trackingStopped', { userId: socketUserId });
+    this.io.emit('trackingStatusUpdate', { userId: socketUserId, isTracking: false });
+
+    console.log(`위치 추적 종료: ${socketUserId}`);
   }
 
-  async handleRequestLocationShare(socket, data) {
+  async handleRequestLocationShare(socket, data = {}) {
     try {
       const { targetUserId } = data;
       const fromUserId = socket.userId;
-      
+
+      if (!fromUserId || !targetUserId) {
+        socket.emit('shareRequestError', { message: '잘못된 요청입니다.', targetUserId });
+        return;
+      }
+
       const targetExists = await User.exists(targetUserId);
       if (!targetExists) {
-        socket.emit('shareRequestError', { message: '존재하지 않는 사용자입니다', targetUserId });
+        socket.emit('shareRequestError', { message: '존재하지 않는 사용자입니다.', targetUserId });
         return;
       }
-      
+
       const targetUser = this.userService.getOnlineUser(targetUserId);
       if (!targetUser) {
-        socket.emit('shareRequestError', { message: '해당 사용자가 현재 오프라인입니다', targetUserId });
+        socket.emit('shareRequestError', { message: '상대 사용자가 오프라인입니다.', targetUserId });
         return;
       }
-      
-      // 상대방이 이미 다른 사람과 공유 중인지 확인
+
+      // 상대가 이미 다른 사용자와 공유 중인지 확인
       const targetSharedUsers = this.locationService.getSharedUsers(targetUserId);
       if (targetSharedUsers.size > 0) {
-        socket.emit('shareRequestError', { message: `${targetUserId}님이 다른 사용자와 공유 중입니다`, targetUserId });
+        socket.emit('shareRequestError', {
+          message: `${targetUserId}님은 이미 다른 사용자와 공유 중입니다.`,
+          targetUserId
+        });
         return;
       }
-      
+
       const requestId = this.locationService.createShareRequest(fromUserId, targetUserId);
-      
+
       this.io.to(targetUser.socketId).emit('locationShareRequest', {
         requestId,
         from: fromUserId,
-        fromName: this.userService.getOnlineUser(fromUserId).name
+        fromName: this.userService.getOnlineUser(fromUserId)?.name || fromUserId
       });
-      
+
       socket.emit('shareRequestSent', { targetUserId, targetName: targetUserId });
     } catch (error) {
-      socket.emit('shareRequestError', { message: '요청 처리 중 오류가 발생했습니다', targetUserId: data.targetUserId });
+      socket.emit('shareRequestError', {
+        message: '요청 처리 중 문제가 발생했습니다.',
+        targetUserId: data.targetUserId
+      });
     }
   }
 
   handleRespondLocationShare(socket, data) {
     const { requestId, accepted } = data;
     const request = this.locationService.getShareRequest(requestId);
-    
+
     if (!request) {
-      socket.emit('shareResponseError', { message: '요청을 찾을 수 없습니다' });
+      socket.emit('shareResponseError', { message: '요청을 찾을 수 없습니다.' });
       return;
     }
-    
-    // 수락 시 이미 공유 중인지 확인
+
     if (accepted) {
       const mySharedUsers = this.locationService.getSharedUsers(request.to);
       if (mySharedUsers.size > 0) {
-        socket.emit('shareResponseError', { message: '이미 다른 사용자와 공유 중입니다' });
-        
-        // 요청자에게 거절 알림
+        socket.emit('shareResponseError', { message: '이미 다른 사용자와 공유 중입니다.' });
+
         const fromUser = this.userService.getOnlineUser(request.from);
         if (fromUser) {
           this.io.to(fromUser.socketId).emit('locationShareResponse', {
             requestId,
             accepted: false,
             targetUserId: request.to,
-            targetName: this.userService.getOnlineUser(request.to).name,
+            targetName: this.userService.getOnlineUser(request.to)?.name || request.to,
             reason: 'busy'
           });
         }
         return;
       }
-      
+
       this.locationService.acceptShareRequest(requestId);
     } else {
       this.locationService.rejectShareRequest(requestId);
     }
-    
+
     const fromUser = this.userService.getOnlineUser(request.from);
     if (fromUser) {
       this.io.to(fromUser.socketId).emit('locationShareResponse', {
         requestId,
         accepted,
         targetUserId: request.to,
-        targetName: this.userService.getOnlineUser(request.to).name
+        targetName: this.userService.getOnlineUser(request.to)?.name || request.to
       });
-      
+
       if (accepted) {
         const fromUserLocation = this.locationService.getLocation(request.from);
         const fromUserHistory = this.locationService.getLocationHistory(request.from);
-        
+
         if (fromUserLocation && fromUserHistory.length > 0) {
           const toUser = this.userService.getOnlineUser(request.to);
           if (toUser) {
@@ -161,7 +208,7 @@ class LocationController {
               lat: fromUserLocation.lat,
               lng: fromUserLocation.lng,
               timestamp: fromUserLocation.timestamp,
-              path: fromUserHistory.map(h => [h.lat, h.lng])
+              path: fromUserHistory.map((h) => [h.lat, h.lng])
             });
           }
         }
@@ -173,13 +220,16 @@ class LocationController {
     const { targetUserId } = data;
     const fromUserId = socket.userId;
 
+    if (!fromUserId || !targetUserId) {
+      socket.emit('shareRequestError', { message: '잘못된 요청입니다.' });
+      return;
+    }
+
     this.locationService.stopLocationShare(fromUserId, targetUserId);
 
-    // 다른 공유 중인 사용자가 있는지 확인
     const sharedUsers = this.locationService.getSharedUsers(fromUserId);
     const hasOtherShares = sharedUsers.size > 0;
 
-    // 다른 공유가 없을 때만 추적 중단
     if (!hasOtherShares) {
       this.userService.setUserTracking(fromUserId, false);
       this.locationService.removeLocation(fromUserId);
@@ -190,7 +240,7 @@ class LocationController {
     if (targetUser) {
       this.io.to(targetUser.socketId).emit('locationShareStopped', {
         fromUserId,
-        fromName: this.userService.getOnlineUser(fromUserId).name
+        fromName: this.userService.getOnlineUser(fromUserId)?.name || fromUserId
       });
       this.io.to(targetUser.socketId).emit('locationRemoved', { userId: fromUserId });
     }
@@ -200,13 +250,16 @@ class LocationController {
     const { fromUserId } = data;
     const toUserId = socket.userId;
 
+    if (!fromUserId || !toUserId) {
+      socket.emit('shareRequestError', { message: '잘못된 요청입니다.' });
+      return;
+    }
+
     this.locationService.stopLocationShare(fromUserId, toUserId);
 
-    // 다른 공유 중인 사용자가 있는지 확인
     const sharedUsers = this.locationService.getSharedUsers(fromUserId);
     const hasOtherShares = sharedUsers.size > 0;
 
-    // 다른 공유가 없을 때만 추적 중단
     if (!hasOtherShares) {
       this.userService.setUserTracking(fromUserId, false);
       this.locationService.removeLocation(fromUserId);
@@ -217,26 +270,41 @@ class LocationController {
     if (fromUser) {
       this.io.to(fromUser.socketId).emit('locationShareStopped', {
         fromUserId: toUserId,
-        fromName: this.userService.getOnlineUser(toUserId).name
+        fromName: this.userService.getOnlineUser(toUserId)?.name || toUserId
       });
     }
   }
 
-  handleRequestCurrentLocation(socket, data) {
+  handleRequestCurrentLocation(socket, data = {}) {
+    const requesterId = socket.userId;
     const { targetUserId } = data;
-    
+
+    if (!requesterId || !targetUserId) {
+      socket.emit('locationAccessError', { message: '잘못된 위치 요청입니다.' });
+      return;
+    }
+
+    const allowedUsers = this.locationService.getAllowedUsers(targetUserId);
+    if (!allowedUsers.has(requesterId)) {
+      socket.emit('locationAccessError', { message: '위치 공유 권한이 없습니다.' });
+      return;
+    }
+
     const targetLocation = this.locationService.getLocation(targetUserId);
     const targetHistory = this.locationService.getLocationHistory(targetUserId);
-    
-    if (targetLocation && targetHistory.length > 0) {
-      socket.emit('locationReceived', {
-        userId: targetUserId,
-        lat: targetLocation.lat,
-        lng: targetLocation.lng,
-        timestamp: targetLocation.timestamp,
-        path: targetHistory.map(h => [h.lat, h.lng])
-      });
+
+    if (!targetLocation || targetHistory.length === 0) {
+      socket.emit('locationAccessError', { message: '공유 가능한 위치 정보가 없습니다.' });
+      return;
     }
+
+    socket.emit('locationReceived', {
+      userId: targetUserId,
+      lat: targetLocation.lat,
+      lng: targetLocation.lng,
+      timestamp: targetLocation.timestamp,
+      path: targetHistory.map((h) => [h.lat, h.lng])
+    });
   }
 }
 
