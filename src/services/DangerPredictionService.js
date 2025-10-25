@@ -288,6 +288,12 @@ class DangerPredictionService {
         },
       };
 
+      console.log("\n====== 모바일 요청 로그 ======");
+      console.log(`시간: ${timeOfDay} (${hour}시), ${isWeekend ? '주말' : '평일'}`);
+      console.log(`응급시설: 병원=${hospitalCount}, 경찰=${policeCount}, 역=${stationCount}`);
+      console.log(`조명: sun_state=${userPayload.context.lighting.sun_state}, street_lights=${userPayload.context.lighting.street_lights}`);
+      console.log(`교통: foot=${footTraffic}, vehicle=${vehicleTraffic}, cctv=${cctvDensity}`);
+
       // ====== OpenAI 호출 ======
       const completion = await this.openai.chat.completions.create({
         model: this.model,
@@ -325,6 +331,9 @@ class DangerPredictionService {
       const raw = completion.choices?.[0]?.message?.content || "{}";
       const modelJson = safeJsonParse(raw, {});
 
+      console.log(`\nAI 원본 응답: score=${modelJson.risk?.score}, level=${modelJson.risk?.level}, confidence=${modelJson.risk?.confidence}`);
+      console.log(`data_gaps: ${modelJson.risk?.data_gaps?.join(', ') || 'none'}`);
+
       // ====== 최소 스키마 검증(간단) ======
       const ok = this.validateModelSchema(modelJson);
       if (!ok) {
@@ -335,12 +344,22 @@ class DangerPredictionService {
 
       // ====== 하향 보정/동기화 파이프라인 ======
       this.enforceLevelByScore(modelJson); // 점수→레벨 강제
+      console.log(`보정 1 (enforceLevelByScore): score=${modelJson.risk.score}, level=${modelJson.risk.level}`);
+      
       this.downgradeOnLowConfidence(modelJson); // 신뢰도/데이터결핍 하향 캡
+      console.log(`보정 2 (downgradeOnLowConfidence): score=${modelJson.risk.score}, level=${modelJson.risk.level}`);
+      
       this.applyContextualCaps(userPayload, modelJson); // 안전 시그널 기반 상한
+      console.log(`보정 3 (applyContextualCaps): score=${modelJson.risk.score}, level=${modelJson.risk.level}`);
+      
       this.reconcileLevelStyles(modelJson); // 색상/반경을 레벨과 절대 동기화
 
       // ====== 레거시 포맷으로도 변환(하위 호환) ======
       const legacy = this.toLegacyFormat(modelJson);
+
+      console.log(`\n최종 결과: overallRiskLevel=${legacy.overallRiskLevel}, zones=${legacy.dangerZones.length}개`);
+      console.log(`Zone levels: ${legacy.dangerZones.map(z => z.riskLevel).join(', ')}`);
+      console.log("============================\n");
 
       return {
         success: true,
