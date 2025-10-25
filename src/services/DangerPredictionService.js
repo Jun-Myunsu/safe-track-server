@@ -2,94 +2,199 @@
 const OpenAI = require("openai");
 
 /**
- * AI 기반 위험 지역 예측 서비스
- * OpenAI GPT-4를 사용하여 위치 데이터 기반 위험도 분석
+ * AI 기반 위험 지역 예측 서비스 (강화 버전)
+ * - 정밀 프롬프트/스키마 통합
+ * - JSON 응답 강제(response_format)
+ * - 신스키마 → 레거시 포맷 자동 변환(하위 호환)
  */
 class DangerPredictionService {
   constructor() {
     this.openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
+
+    this.model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+    // 레벨-색상/반경 매핑(스키마 기본값)
+    this.levelStyle = {
+      LOW: { color: "#2ecc71", radius: 60 },
+      MEDIUM: { color: "#f1c40f", radius: 80 },
+      HIGH: { color: "#e67e22", radius: 100 },
+      CRITICAL: { color: "#e74c3c", radius: 120 },
+    };
+
+    // ======== 프롬프트: 시스템 ========
+    this.SYSTEM_PROMPT = `
+당신은 "위치 안전 어시스턴트"입니다. 당신의 임무는 주어진 위치와 맥락 데이터를 바탕으로
+해당 지점(또는 경로)의 현재 위험도를 정량·정성적으로 평가하고, 지도를 위한 시각화 정보와
+행동 권고를 편향 없이 생성하는 것입니다.
+
+핵심 원칙
+- 환경·맥락 기반: 조명, 유동인구, 교통량, 시간대, 영업 중 시설, CCTV/가로등 밀도, 날씨, 이벤트,
+  신고/사고 이력(개인/집단 특성 제외), 지형(골목/공터/하천변) 등 환경 요인만 고려합니다.
+- 금지: 인종/성별/국적/복장/사회경제적 지위 등 개인 특성 추정·일반화·프로파일링 금지.
+- 투명성: 사용한 근거를 요인별로 설명하고, 데이터가 부족하면 "불확실성"을 올려서 보고합니다.
+- 실시간성: "지금 시간과 조건" 중심으로 평가하되, 과거 데이터는 보정적으로만 사용합니다.
+- 보수성: 의심 구간은 낮은 확신으로 표시하고, 행동 권고는 과도하지 않되 즉시 실행 가능해야 합니다.
+
+리스크 등급 캘리브레이션(기본)
+- 0–24: LOW   (지도 색상: #2ecc71, 반경: 60 m)
+- 25–49: MEDIUM (지도 색상: #f1c40f, 반경: 80 m)
+- 50–74: HIGH  (지도 색상: #e67e22, 반경: 100 m)
+- 75–100: CRITICAL (지도 색상: #e74c3c, 반경: 120 m)
+
+불확실성 처리
+- 핵심 입력(시간/날씨/조도/군중/교통/시설/사고 이력)이 결핍되면 confidence를 낮추고 data_gaps에 결핍 항목을 구체적으로 명시합니다.
+- 데이터 공백을 임의 추정하지 말고, 의견 대신 조건부 권고로 대체합니다.
+
+지도로의 매핑
+- 현재 지점 표시는 marker.icon, marker.color, radius_m로 제공합니다.
+- 열지도/버퍼 표현을 위해 heat.contributors 배열(요인별 가중·근거)을 제공합니다.
+- 경로 위험 평가가 들어오면 segments[]에 각 구간별 점수와 이유를 제공합니다.
+
+안전 권고
+- 2–5개의 즉시 실행 가능 권고를 중요도 순으로 작성합니다.
+- 과도한 공포 유발 표현, 법률/의료적 조언 단정, 불가능한 지시 금지.
+`.trim();
+
+    // ======== 프롬프트: 개발자(스키마 고정) ========
+    this.DEV_PROMPT_SCHEMA = `
+다음 JSON 스키마로만 응답하세요. 추가 텍스트 금지.
+
+{
+  "location": {
+    "lat": number,
+    "lng": number,
+    "address_hint": string
+  },
+  "context": {
+    "timestamp_local": string,
+    "weather": { "condition": string, "precip_mm": number, "temp_c": number, "wind_mps": number, "is_rain": boolean, "is_snow": boolean },
+    "lighting": { "sun_state": "day|civil_twilight|nautical_twilight|night", "street_lights": "low|medium|high|unknown" },
+    "foot_traffic": "low|medium|high|unknown",
+    "vehicle_traffic": "low|medium|high|unknown",
+    "open_pois": [ { "type": string, "name": string, "distance_m": number } ],
+    "cctv_density": "low|medium|high|unknown",
+    "recent_incidents": [ { "type": string, "age_hours": number, "distance_m": number, "severity": "minor|moderate|major" } ],
+    "events": [ { "name": string, "distance_m": number, "crowd_level": "low|medium|high" } ]
+  },
+  "risk": {
+    "score": number,
+    "level": "LOW|MEDIUM|HIGH|CRITICAL",
+    "confidence": number,
+    "top_factors": [ { "factor": string, "direction": "↑|↓", "weight": number, "evidence": string } ],
+    "data_gaps": [ string ],
+    "calibration_notes": string
+  },
+  "map": {
+    "color_hex": string,
+    "radius_m": number,
+    "marker": { "icon": "pin|shield|alert|footprint", "color": string }
+  },
+  "guidance": {
+    "immediate_actions": [ string ],
+    "route_advice": string,
+    "meeting_point": string
+  },
+  "heat": {
+    "contributors": [ { "name": string, "score_delta": number, "rationale": string } ]
+  },
+  "segments": [
+    {
+      "from": [number, number], "to": [number, number],
+      "score": number, "level": "LOW|MEDIUM|HIGH|CRITICAL",
+      "reasons": [ string ]
+    }
+  ]
+}
+
+검증 규칙:
+- risk.level은 score 구간에 맞아야 합니다.
+- color_hex, radius_m은 level과 일치해야 합니다.
+- confidence는 0.0~1.0.
+- 설명(evidence/rationale)은 구체적 맥락+거리/시간을 포함.
+`.trim();
   }
 
   /**
    * 위치 기반 위험 지역 분석
-   * @param {Object} params - 분석 파라미터
-   * @returns {Promise<Object>} 위험 분석 결과
+   * @param {Object} params
+   * @returns {Promise<Object>} { success, data, metadata|error }
    */
   async analyzeDangerZones({
     locationHistory = [],
     currentLocation,
     timestamp = new Date(),
     emergencyFacilities = { hospitals: [], police: [], stations: [] },
+
+    // 선택 입력(없으면 unknown으로 처리)
+    weather = null,          // { condition, precip_mm, temp_c, wind_mps, is_rain, is_snow }
+    lighting = null,         // { sun_state, street_lights }
+    footTraffic = "unknown", // "low|medium|high|unknown"
+    vehicleTraffic = "unknown",
+    openPois = [],           // [{type,name,distance_m}]
+    cctvDensity = "unknown", // "low|medium|high|unknown"
+    recentIncidents = [],    // [{type, age_hours, distance_m, severity}]
+    events = [],             // [{name, distance_m, crowd_level}]
+    segments = []            // [{from:[lat,lng], to:[lat,lng]}]
   }) {
     if (!process.env.OPENAI_API_KEY) {
       console.warn("OpenAI API key not configured");
       return {
         success: false,
         error: "OpenAI API key not configured",
-        data: this.generateDefaultSafetyInfo(
-          currentLocation,
-          timestamp,
-          emergencyFacilities
-        ),
+        data: this.generateDefaultSafetyInfo(currentLocation, timestamp, emergencyFacilities),
       };
     }
 
     try {
+      // ====== 기존 휴리스틱(참조/메타데이터 용) ======
       const hour = timestamp.getHours();
       const dayOfWeek = timestamp.getDay();
       const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
       const isNight = hour >= 22 || hour < 6;
       const isRushHour = (hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19);
+      const timeOfDay =
+        hour >= 6 && hour < 12 ? "아침" :
+        hour >= 12 && hour < 18 ? "오후" :
+        hour >= 18 && hour < 22 ? "저녁" : "심야";
 
-      // 시간대 상세 분류
-      const timeOfDay = hour >= 6 && hour < 12 ? '아침' :
-                        hour >= 12 && hour < 18 ? '오후' :
-                        hour >= 18 && hour < 22 ? '저녁' : '심야';
-      const isLateNight = hour >= 23 || hour < 4;
-      const isDawn = hour >= 4 && hour < 6;
-
-      // 위치 이력 분석 (5분 간격 고려)
       const recentMovements = locationHistory.slice(-10);
       const hasLocationHistory = recentMovements.length > 0;
-      const locationStability = recentMovements.length >= 3 ? '안정적' : '불안정';
+      const locationStability = recentMovements.length >= 3 ? "안정적" : "불안정";
 
-      // 응급시설 밀집도 분석
       const hospitalCount = emergencyFacilities.hospitals?.length || 0;
       const policeCount = emergencyFacilities.police?.length || 0;
       const stationCount = emergencyFacilities.stations?.length || 0;
       const totalEmergencyFacilities = hospitalCount + policeCount + stationCount;
 
-      const facilityDensity = totalEmergencyFacilities === 0 ? '매우 낮음' :
-                              totalEmergencyFacilities <= 2 ? '낮음' :
-                              totalEmergencyFacilities <= 5 ? '보통' : '높음';
+      // 내부 메타 스코어(참고용)
+      let riskScore = 0;
+      if (hour >= 6 && hour < 18) riskScore += 0;
+      else if (hour >= 18 && hour < 22) riskScore += 10;
+      else if (hour >= 22 || hour < 2) riskScore += 25;
+      else riskScore += 40;
+      riskScore += policeCount >= 2 ? 0 : policeCount === 1 ? 10 : 30;
+      riskScore += hospitalCount >= 2 ? 0 : hospitalCount === 1 ? 5 : 15;
+      riskScore += stationCount >= 1 ? 0 : 15;
 
-      // 응급대응 수준 평가
-      const emergencyResponseLevel =
-        policeCount >= 2 ? '높음' :
-        policeCount === 1 ? '보통' : '낮음';
+      const calculatedRiskLevel = riskScore <= 50 ? "low" : "medium";
 
-      const context = {
+      const contextMeta = {
         currentLocation: {
           lat: currentLocation.lat,
           lng: currentLocation.lng,
-          address: `위도 ${currentLocation.lat.toFixed(
-            4
-          )}, 경도 ${currentLocation.lng.toFixed(4)}`,
+          address: `위도 ${Number(currentLocation.lat).toFixed(4)}, 경도 ${Number(currentLocation.lng).toFixed(4)}`
         },
         timeContext: {
           hour,
           timeOfDay,
           dayOfWeek,
-          dayName: ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'][dayOfWeek],
+          dayName: ["일요일", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일"][dayOfWeek],
           isWeekend,
           isWeekday: !isWeekend,
           isNight,
-          isLateNight,
-          isDawn,
-          isRushHour,
-          isMidnight: hour === 0 || hour === 12,
+          isRushHour
         },
         locationHistory: {
           recentCount: recentMovements.length,
@@ -101,296 +206,201 @@ class DangerPredictionService {
           policeCount: policeCount,
           stationsCount: stationCount,
           totalCount: totalEmergencyFacilities,
-          facilityDensity,
-          emergencyResponseLevel,
-          hasHospital: hospitalCount > 0,
-          hasPolice: policeCount > 0,
-          hasStation: stationCount > 0,
+        },
+        riskScore: {
+          total: riskScore,
+          timeScore: (hour >= 6 && hour < 18) ? 0 : (hour >= 18 && hour < 22) ? 10 : (hour >= 22 || hour < 2) ? 25 : 40,
+          policeScore: policeCount >= 2 ? 0 : policeCount === 1 ? 10 : 30,
+          hospitalScore: hospitalCount >= 2 ? 0 : hospitalCount === 1 ? 5 : 15,
+          stationScore: stationCount >= 1 ? 0 : 15,
+          calculatedRiskLevel
         },
       };
 
+      // ====== 유저 프롬프트 템플릿 구성 ======
+      const userPayload = {
+        location: {
+          lat: Number(currentLocation.lat),
+          lng: Number(currentLocation.lng),
+          address_hint: "",
+        },
+        context: {
+          timestamp_local: toLocalIso(timestamp),
+          weather: normalizeWeather(weather),
+          lighting: normalizeLighting(lighting, hour),
+          foot_traffic: footTraffic || "unknown",
+          vehicle_traffic: vehicleTraffic || "unknown",
+          open_pois: (openPois || []).slice(0, 5),
+          cctv_density: cctvDensity || "unknown",
+          recent_incidents: recentIncidents || [],
+          events: events || [],
+        },
+        segments: (segments || []),
+      };
+
+      // ====== OpenAI 호출 ======
       const completion = await this.openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: this.model,
         messages: [
-          {
-            role: "system",
-            content: `당신은 객관적이고 데이터 기반의 도시 안전 분석 전문가입니다.
-실제 범죄 통계와 도시 안전 연구를 기반으로 정확하고 균형잡힌 위험도 평가를 제공합니다.
-
-## 핵심 원칙
-
-1. **과장하지 않기**: 대부분의 도시 지역은 안전합니다
-2. **데이터 기반 평가**: 실제 범죄 통계와 시간대별 패턴 활용
-3. **균형잡힌 시각**: 안전한 지역과 주의 지역을 모두 명확히 표시
-4. **실용적 조언**: 구체적이고 실행 가능한 안전 수칙 제공
-
-## 시간대별 위험도 평가 (통계 기반)
-
-### 주간 시간대 (06:00~18:00) - 기본적으로 안전
-- **06:00~09:00 (아침)**: 출근 시간, 사람 많음 → **매우 안전**
-- **09:00~12:00 (오전)**: 업무 시간, 활동 활발 → **매우 안전**
-- **12:00~14:00 (점심)**: 최대 인구 밀도 → **가장 안전**
-- **14:00~18:00 (오후)**: 업무 시간, 활동 지속 → **매우 안전**
-- **평가**: overallRiskLevel = "low", 대부분 지역 "safe" 또는 "low"
-
-### 저녁 시간대 (18:00~22:00) - 대체로 안전
-- **18:00~20:00 (퇴근)**: 귀가 인파, 상업지역 활발 → **안전**
-- **20:00~22:00 (초저녁)**: 식사/여가 활동 → **보통 안전**
-- **평가**: overallRiskLevel = "low", 상업지역 "safe", 주거지역 "low"
-
-### 야간 시간대 (22:00~24:00) - 주의 필요
-- **22:00~24:00**: 인적 감소, 가시성 저하 → **주의**
-- **평가**: 
-  - 경찰시설 2개 이상 → overallRiskLevel = "low"
-  - 경찰시설 1개 → overallRiskLevel = "low" (여전히 안전)
-  - 경찰시설 0개 → overallRiskLevel = "medium"
-
-### 심야/새벽 (00:00~06:00) - 경계 필요
-- **00:00~02:00 (심야)**: 유흥 종료, 취객 주의 → **경계**
-- **02:00~04:00 (깊은 밤)**: 최소 인구, 범죄율 상승 → **높은 경계**
-- **04:00~06:00 (새벽)**: 점진적 활동 시작 → **경계**
-- **평가**:
-  - 경찰시설 2개 이상 → overallRiskLevel = "medium"
-  - 경찰시설 1개 → overallRiskLevel = "medium"
-  - 경찰시설 0개 → overallRiskLevel = "high"
-
-## 응급시설 기반 안전도 평가
-
-### 경찰시설 (범죄 억제 효과)
-- **2개 이상**: 순찰 밀도 높음 → 범죄율 40% 감소 → **매우 안전**
-- **1개**: 정기 순찰 → 범죄율 20% 감소 → **안전**
-- **0개**: 순찰 빈도 낮음 → 기본 수준 → **주의**
-
-### 병원 (인구 밀도 지표)
-- **2개 이상**: 도심 상업지역 → 인구 밀집 → **안전**
-- **1개**: 중규모 지역 → 적정 인구 → **보통**
-- **0개**: 주거/외곽 지역 → 인구 적음 → **주의**
-
-### 대중교통 (접근성 지표)
-- **역/정류장 있음**: 접근성 좋음, 사람 많음 → **안전**
-- **없음**: 외곽 지역 가능성 → **주의**
-
-## 위험도 레벨 정의 (엄격한 기준)
-
-### overallRiskLevel (전체 위험도)
-
-**Low (낮음)** - 대부분의 경우
-- 주간 시간대 (06:00~22:00) 전체
-- 야간이라도 경찰시설 1개 이상
-- 응급시설 총 2개 이상
-- **조건**: 시간대 OR 시설 중 하나라도 충족
-
-**Medium (보통)** - 제한적 상황
-- 야간(22:00~02:00) + 경찰시설 0개
-- 심야(02:00~06:00) + 경찰시설 1개 이상
-- **조건**: 야간 AND 시설 부족
-
-**High (높음)** - 극히 드문 경우
-- 심야(02:00~06:00) + 경찰시설 0개 + 병원 0개
-- **조건**: 심야 AND 모든 시설 없음
-
-### dangerZones 개별 지역 위험도
-
-**Safe (안전)** - 초록색, 적극 표시
-- 경찰시설 500m 이내
-- 주간(06:00~18:00) + 응급시설 1개 이상
-- 병원 + 역 근처 (상업지역 추정)
-- **최소 2~3개 지역 필수 표시**
-
-**Low (낮은 주의)** - 노란색, 일반적
-- 주간 시간대 일반 지역
-- 야간이라도 경찰시설 있음
-- 응급시설 1개 이상
-- **큰 위험 없음, 기본 주의만 필요**
-
-**Medium (보통 주의)** - 오렌지색, 선택적
-- 야간(22:00~) + 경찰시설 없음
-- 외곽 지역 추정 (시설 0개)
-- **실제 위험 요소 있을 때만 사용**
-
-**High (높은 경계)** - 빨간색, 극히 드물게
-- 심야(02:00~06:00) + 모든 시설 없음 + 외진 곳
-- **정말 위험한 상황에만 사용 (월 1회 미만)**
-
-## 출력 형식
-
-JSON 객체로 응답하세요:
-- overallRiskLevel: low/medium/high
-- dangerZones: 배열 (lat, lng, radius, riskLevel, reason, recommendations)
-- safetyTips: 문자열 배열
-- analysisTimestamp: ISO 8601 형식
-
-## 필수 준수 사항
-
-1. **안전 지역 우선 표시**: 총 4~6개 지역 중 safe 2~3개 필수
-2. **주간은 대부분 safe**: 06:00~18:00는 특별한 이유 없으면 safe
-3. **경찰시설 근처는 safe**: 500m 이내는 시간 무관 safe
-4. **과장 금지**: 확인되지 않은 정보 사용 금지
-5. **균형 유지**: 위험만 강조하지 말고 안전한 경로도 제시
-6. **구체적 조언**: "주의하세요" 대신 "경찰서 방향으로 이동" 같은 구체적 행동 제시
-7. **반경 적절히**: 200~500m, 너무 넓지 않게
-
-## 예시 평가
-
-**상황 1**: 오후 2시, 경찰서 1개, 병원 1개
-→ overallRiskLevel: "low", safe 3개 + low 2개
-
-**상황 2**: 밤 11시, 경찰서 1개, 병원 0개
-→ overallRiskLevel: "low", safe 2개 (경찰서 근처) + low 3개
-
-**상황 3**: 새벽 3시, 경찰서 0개, 병원 0개
-→ overallRiskLevel: "high", safe 1개 (가장 가까운 시설) + medium 3개 + high 1개`,
-          },
+          { role: "system", content: this.SYSTEM_PROMPT },
+          { role: "system", content: this.DEV_PROMPT_SCHEMA },
           {
             role: "user",
-            content: `## 현재 상황 분석
-
-### 📍 위치 정보
-- 좌표: ${context.currentLocation.address}
-
-### ⏰ 시간 분석
-- **현재 시각: ${hour}시 (${context.timeContext.timeOfDay})**
-- 요일: ${context.timeContext.dayName} (${isWeekend ? '주말' : '평일'})
-- 시간대 평가:
-  * ${hour >= 6 && hour < 18 ? '✅ 주간 시간대 (매우 안전)' : ''}
-  * ${hour >= 18 && hour < 22 ? '✅ 저녁 시간대 (안전)' : ''}
-  * ${hour >= 22 || hour < 2 ? '⚠️ 야간 시간대 (주의 필요)' : ''}
-  * ${hour >= 2 && hour < 6 ? '⚠️ 심야 시간대 (경계 필요)' : ''}
-  * ${isRushHour ? '🚌 출퇴근 시간 (사람 많음, 안전)' : ''}
-
-### 🏥 응급시설 현황 (범죄 억제력)
-- **경찰시설: ${context.nearbyEmergencyFacilities.policeCount}개** ${context.nearbyEmergencyFacilities.policeCount >= 2 ? '(매우 안전)' : context.nearbyEmergencyFacilities.policeCount === 1 ? '(안전)' : '(주의)'}
-- 병원: ${context.nearbyEmergencyFacilities.hospitalsCount}개 ${context.nearbyEmergencyFacilities.hospitalsCount >= 1 ? '(상업지역 추정)' : ''}
-- 대중교통: ${context.nearbyEmergencyFacilities.stationsCount}개 ${context.nearbyEmergencyFacilities.stationsCount >= 1 ? '(접근성 좋음)' : ''}
-- 총 시설: ${context.nearbyEmergencyFacilities.totalCount}개
-
-### 📊 위치 이력
-- 최근 위치 기록: ${context.locationHistory.recentCount}개
-- 이동 상태: ${context.locationHistory.stability}
-
----
-
-## 분석 요청
-
-위 데이터를 기반으로 **객관적이고 균형잡힌** 평가를 수행해주세요.
-
-### 1단계: 전체 위험도 결정 (overallRiskLevel)
-
-**엄격한 기준 적용:**
-
-- **Low** (대부분의 경우):
-  - 주간 시간대 (06:00~22:00) 전체
-  - 야간이라도 경찰시설 1개 이상
-  - 응급시설 총 2개 이상
-  
-- **Medium** (제한적):
-  - 야간(22:00~02:00) + 경찰시설 0개
-  - 심야(02:00~06:00) + 경찰시설 1개
-  
-- **High** (극히 드물게):
-  - 심야(02:00~06:00) + 경찰시설 0개 + 병원 0개
-
-**현재 상황 평가:**
-- 시간: ${hour}시
-- 경찰시설: ${context.nearbyEmergencyFacilities.policeCount}개
-- 병원: ${context.nearbyEmergencyFacilities.hospitalsCount}개
-- **→ overallRiskLevel = ?**
-
-### 2단계: 지역별 안전도 표시 (dangerZones)
-
-**필수 요구사항:**
-- 총 4~6개 지역 표시
-- **Safe (초록색) 2~3개 필수 포함**
-- 각 지역은 현재 위치에서 200~500m 반경
-
-**지역별 평가 기준:**
-
-1. **Safe (초록색)** - 적극 표시:
-   - 경찰시설 500m 이내 방향
-   - 주간(06:00~18:00) + 시설 1개 이상
-   - 병원 + 역 근처 (상업지역)
-   - **최소 2개 필수**
-
-2. **Low (노란색)** - 일반적:
-   - 주간 일반 지역
-   - 야간 + 경찰시설 있음
-   - 큰 위험 없음
-
-3. **Medium (오렌지색)** - 선택적:
-   - 야간 + 경찰시설 없는 방향
-   - 실제 위험 요소 있을 때만
-
-4. **High (빨간색)** - 극히 드물게:
-   - 심야 + 모든 시설 없음
-   - 정말 위험한 경우만
-
-### 3단계: 실용적 조언 (safetyTips)
-
-**구체적이고 실행 가능한 조언 3~5개:**
-- "주의하세요" 같은 추상적 조언 금지
-- "경찰서 방향으로 이동하세요" 같은 구체적 행동 제시
-- 안전한 경로 (초록색 지역) 안내
-- 가까운 시설 위치 안내
-
----
-
-**중요 주의사항:**
-
-1. ✅ 주간(06:00~18:00)은 대부분 Safe로 평가
-2. ✅ 경찰시설 근처는 시간 무관 Safe
-3. ✅ 반드시 Safe 지역 2~3개 포함
-4. ❌ 과도한 위험 평가 금지
-5. ❌ 확인되지 않은 범죄 통계 사용 금지
-6. ✅ 안전한 경로를 명확히 제시
-
-JSON 형식으로 응답해주세요.`,
+            content:
+              "다음 위치/맥락에 대해 현재 위험도를 평가하고, 이전 메시지의 스키마(JSON)로만 답하세요. 데이터가 부족하면 data_gaps에 사유를 명시하고 confidence를 낮추세요.\n\n" +
+              JSON.stringify(userPayload),
           },
         ],
         response_format: { type: "json_object" },
-        temperature: 0.3,
+        temperature: 0.2,
+        top_p: 0.9,
+        presence_penalty: 0,
+        frequency_penalty: 0,
         max_tokens: 1500,
       });
 
-      const result = JSON.parse(completion.choices[0].message.content);
+      const raw = completion.choices?.[0]?.message?.content || "{}";
+      const modelJson = safeJsonParse(raw, {});
 
-      if (
-        !result.overallRiskLevel ||
-        !result.dangerZones ||
-        !result.safetyTips
-      ) {
-        throw new Error("Invalid response format from OpenAI");
+      // ====== 최소 스키마 검증(간단) ======
+      const ok = this.validateModelSchema(modelJson);
+      if (!ok) {
+        throw new Error("Invalid response format from OpenAI (schema mismatch)");
       }
+
+      // 레벨↔스타일 보정(모델이 잘못 주면 교정)
+      this.reconcileLevelStyles(modelJson);
+
+      // ====== 레거시 포맷으로도 변환(하위 호환) ======
+      const legacy = this.toLegacyFormat(modelJson);
 
       return {
         success: true,
-        data: result,
+        data: legacy,                  // <-- 기존 UI가 쓰던 포맷
         metadata: {
           timestamp: timestamp.toISOString(),
-          model: "gpt-4o-mini",
-          context,
+          model: this.model,
+          context: contextMeta,
+          raw_model: modelJson,       // <-- 필요 시 사용(새 스키마)
         },
       };
     } catch (error) {
       console.error("Danger prediction error:", error);
-
       return {
         success: false,
         error: error.message,
-        data: this.generateDefaultSafetyInfo(
-          currentLocation,
-          timestamp,
-          emergencyFacilities
-        ),
+        data: this.generateDefaultSafetyInfo(currentLocation, timestamp, emergencyFacilities),
       };
     }
   }
 
   /**
-   * 기본 안전 정보 생성
-   * @param {Object} currentLocation - 현재 위치
-   * @param {Date} timestamp - 현재 시간
-   * @param {Object} emergencyFacilities - 응급 시설
-   * @returns {Object} 기본 안전 정보
+   * 간단 스키마 검증 (외부 라이브러리 없이 핵심 필드만 확인)
+   */
+  validateModelSchema(obj) {
+    if (!obj || typeof obj !== "object") return false;
+    const must = [
+      "location", "context", "risk", "map", "guidance", "heat"
+    ];
+    for (const k of must) if (!(k in obj)) return false;
+
+    // 핵심 필드
+    if (typeof obj.location?.lat !== "number") return false;
+    if (typeof obj.location?.lng !== "number") return false;
+    if (!obj.risk || typeof obj.risk.score !== "number") return false;
+    if (!obj.risk.level || typeof obj.risk.level !== "string") return false;
+    if (!obj.map || typeof obj.map.color_hex !== "string") return false;
+    if (typeof obj.map.radius_m !== "number") return false;
+    if (!Array.isArray(obj.guidance?.immediate_actions)) return false;
+
+    return true;
+  }
+
+  /**
+   * 모델이 level에 맞지 않는 색/반경을 준 경우 스타일 보정
+   */
+  reconcileLevelStyles(modelJson) {
+    const L = modelJson?.risk?.level || "MEDIUM";
+    const style = this.levelStyle[L] || this.levelStyle.MEDIUM;
+    if (!/^#?[0-9a-fA-F]{6}$/.test(modelJson.map.color_hex || "")) {
+      modelJson.map.color_hex = style.color;
+    }
+    if (!Number.isFinite(modelJson.map.radius_m) || modelJson.map.radius_m <= 0) {
+      modelJson.map.radius_m = style.radius;
+    }
+    if (!modelJson.map.marker || typeof modelJson.map.marker !== "object") {
+      modelJson.map.marker = { icon: "pin", color: style.color };
+    } else {
+      modelJson.map.marker.color = modelJson.map.marker.color || style.color;
+      modelJson.map.marker.icon = modelJson.map.marker.icon || "pin";
+    }
+  }
+
+  /**
+   * 새 스키마(JSON) → 기존 포맷(legacy) 변환
+   * legacy:
+   *  - overallRiskLevel: "low|medium|high"
+   *  - dangerZones: [{lat,lng,radius,riskLevel,reason,recommendations[]}]
+   *  - safetyTips: [string]
+   *  - analysisTimestamp: iso
+   */
+  toLegacyFormat(modelJson) {
+    const levelMap = {
+      LOW: "low",
+      MEDIUM: "low",   // 기존 코드가 0-50을 low로 썼으므로 MEDIUM도 low로 매핑
+      HIGH: "medium",
+      CRITICAL: "medium",
+    };
+
+    const overallRiskLevel = levelMap[modelJson.risk.level] || "low";
+
+    // 중심점 1개 + heat/segments 보조 → 4~6개로 구성
+    const center = {
+      lat: modelJson.location.lat,
+      lng: modelJson.location.lng,
+      radius: clamp(Math.round(modelJson.map.radius_m), 200, 500),
+      riskLevel: levelMap[modelJson.risk.level] || "low",
+      reason:
+        (modelJson.risk.top_factors?.[0]?.evidence) ||
+        "환경·조도·시설 밀도를 종합한 평가",
+      recommendations: (modelJson.guidance.immediate_actions || []).slice(0, 3),
+    };
+
+    // heat.contributors 기반 주변 포인트(간단하게 방사형 샘플)
+    const extras = (modelJson.heat?.contributors || [])
+      .slice(0, 4)
+      .map((h, i) => {
+        const dMeters = 200 + i * 60; // 200~380m
+        const bearing = (i * Math.PI) / 2; // 0, 90, 180, 270 deg
+        const off = offsetLatLng(center.lat, center.lng, dMeters, bearing);
+        const up = (h.score_delta || 0) >= 0;
+        const lv = up ? "medium" : "low";
+        return {
+          lat: off.lat,
+          lng: off.lng,
+          radius: clamp(Math.round(modelJson.map.radius_m * 1.1), 220, 500),
+          riskLevel: lv,
+          reason: h.rationale || h.name || "요인 기반 가중치",
+          recommendations: up
+            ? [modelJson.guidance.route_advice || "밝은 길/혼잡 지역으로 경로 조정"]
+            : [modelJson.guidance.meeting_point || "인근 개방형 시설로 이동"],
+        };
+      });
+
+    // 최소 4개~최대 6개 유지
+    const zones = [center, ...extras].slice(0, 6);
+    while (zones.length < 4) zones.push({ ...center, radius: center.radius });
+
+    return {
+      overallRiskLevel,
+      dangerZones: zones,
+      safetyTips: (modelJson.guidance.immediate_actions || []).slice(0, 5),
+      analysisTimestamp: modelJson.context?.timestamp_local || new Date().toISOString(),
+    };
+  }
+
+  /**
+   * 기본 안전 정보(폴백)
    */
   generateDefaultSafetyInfo(currentLocation, timestamp, emergencyFacilities) {
     const hour = timestamp.getHours();
@@ -431,6 +441,89 @@ JSON 형식으로 응답해주세요.`,
       analysisTimestamp: timestamp.toISOString(),
     };
   }
+}
+
+/* ===================== 유틸 ===================== */
+
+function safeJsonParse(s, fallback) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return fallback;
+  }
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function toLocalIso(date) {
+  // 아시아/서울 기준 로컬 오프셋 포함 ISO (간단 버전: 시스템 타임존 사용)
+  const t = new Date(date);
+  const tzOffsetMin = -t.getTimezoneOffset();
+  const sign = tzOffsetMin >= 0 ? "+" : "-";
+  const pad = (x, n = 2) => String(Math.floor(Math.abs(x))).padStart(n, "0");
+  const yyyy = t.getFullYear();
+  const MM = pad(t.getMonth() + 1);
+  const dd = pad(t.getDate());
+  const hh = pad(t.getHours());
+  const mm = pad(t.getMinutes());
+  const ss = pad(t.getSeconds());
+  const offH = pad(tzOffsetMin / 60);
+  const offM = pad(tzOffsetMin % 60);
+  return `${yyyy}-${MM}-${dd}T${hh}:${mm}:${ss}${sign}${offH}:${offM}`;
+}
+
+// 날씨/조도 기본값 보정
+function normalizeWeather(w) {
+  if (w && typeof w === "object") {
+    return {
+      condition: w.condition ?? "unknown",
+      precip_mm: Number.isFinite(w.precip_mm) ? w.precip_mm : 0,
+      temp_c: Number.isFinite(w.temp_c) ? w.temp_c : 0,
+      wind_mps: Number.isFinite(w.wind_mps) ? w.wind_mps : 0,
+      is_rain: !!w.is_rain,
+      is_snow: !!w.is_snow,
+    };
+  }
+  return {
+    condition: "unknown",
+    precip_mm: 0,
+    temp_c: 0,
+    wind_mps: 0,
+    is_rain: false,
+    is_snow: false,
+  };
+}
+
+function normalizeLighting(l, hour) {
+  if (l && typeof l === "object") {
+    return {
+      sun_state: l.sun_state || inferSunState(hour),
+      street_lights: l.street_lights || "unknown",
+    };
+  }
+  return {
+    sun_state: inferSunState(hour),
+    street_lights: "unknown",
+  };
+}
+function inferSunState(hour) {
+  if (hour >= 6 && hour < 18) return "day";
+  if (hour >= 18 && hour < 19) return "civil_twilight";
+  if (hour >= 19 && hour < 20) return "nautical_twilight";
+  return "night";
+}
+
+// 위도/경도에서 m거리/라디안 방위로 오프셋(간이 계산)
+function offsetLatLng(lat, lng, meters, bearingRad) {
+  const R = 6378137; // Earth radius (m)
+  const dLat = (meters * Math.cos(bearingRad)) / R;
+  const dLng = (meters * Math.sin(bearingRad)) / (R * Math.cos((lat * Math.PI) / 180));
+  return {
+    lat: lat + (dLat * 180) / Math.PI,
+    lng: lng + (dLng * 180) / Math.PI,
+  };
 }
 
 module.exports = DangerPredictionService;
