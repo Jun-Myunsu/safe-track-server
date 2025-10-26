@@ -8,8 +8,19 @@ async function initDatabase() {
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(50) PRIMARY KEY,
         password VARCHAR(255) NOT NULL,
+        is_admin BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+
+    // 기존 users 테이블에 is_admin 커럼 추가 (이미 있으면 무시)
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE
+    `);
+
+    // msjun을 관리자로 설정
+    await pool.query(`
+      UPDATE users SET is_admin = TRUE WHERE id = 'msjun'
     `);
 
     // friends 테이블 생성

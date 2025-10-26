@@ -76,7 +76,10 @@ class AuthController {
 
         await AuthService.updateSession(sessionId, socket.id);
 
-        socket.emit('sessionValid', { userId });
+        const User = require('../models/User');
+        const isAdmin = await User.isAdmin(userId);
+        
+        socket.emit('sessionValid', { userId, isAdmin });
         this.io.emit('userList', this.userService.getAllOnlineUsers());
 
         this.restoreShareState(socket, userId);
@@ -118,7 +121,10 @@ class AuthController {
       const sessionId = await AuthService.createSession(userId, socket.id);
       socket.sessionId = sessionId;
 
-      socket.emit('registerSuccess', { userId, sessionId });
+      const User = require('../models/User');
+      const isAdmin = await User.isAdmin(userId);
+      
+      socket.emit('registerSuccess', { userId, sessionId, isAdmin });
       this.io.emit('userList', this.userService.getAllOnlineUsers());
     } catch (error) {
       socket.emit('registerError', { message: error.message });
@@ -149,7 +155,10 @@ class AuthController {
       const sessionId = await AuthService.createSession(userId, socket.id);
       socket.sessionId = sessionId;
 
-      socket.emit('loginSuccess', { userId, sessionId });
+      const User = require('../models/User');
+      const isAdmin = await User.isAdmin(userId);
+      
+      socket.emit('loginSuccess', { userId, sessionId, isAdmin });
       this.io.emit('userList', this.userService.getAllOnlineUsers());
 
       this.restoreShareState(socket, userId);

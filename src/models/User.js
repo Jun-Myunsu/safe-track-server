@@ -26,6 +26,16 @@ class User {
     }
   }
 
+  static async isAdmin(userId) {
+    try {
+      const result = await pool.query('SELECT is_admin FROM users WHERE id = $1', [userId]);
+      return result.rows[0]?.is_admin || false;
+    } catch (error) {
+      console.error('관리자 확인 실패:', error);
+      return false;
+    }
+  }
+
   static async search(query) {
     try {
       const result = await pool.query(
