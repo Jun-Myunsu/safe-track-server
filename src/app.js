@@ -72,6 +72,8 @@ class SafeTrackServer {
       });
     });
 
+
+
     this.app.post("/api/emergency-tip", async (_req, res) => {
       try {
         const tip = await this.aiChatService.generateEmergencyTip();
@@ -120,6 +122,26 @@ class SafeTrackServer {
           success: false,
           error: "정체 사용자 삭제 실패",
         });
+      }
+    });
+
+    this.app.post("/api/amber", async (req, res) => {
+      try {
+        const params = new URLSearchParams();
+        for (const [k, v] of Object.entries(req.body || {})) {
+          if (Array.isArray(v)) v.forEach((vv) => params.append(k, vv));
+          else params.append(k, v ?? "");
+        }
+        const response = await fetch("https://www.safe182.go.kr/api/lcm/amberList.do", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+          body: params.toString(),
+        });
+        const text = await response.text();
+        res.type("application/json").send(text);
+      } catch (error) {
+        console.error("실종자 데이터 로드 실패:", error);
+        res.status(500).json({ error: "실종자 데이터 로드 실패" });
       }
     });
   }

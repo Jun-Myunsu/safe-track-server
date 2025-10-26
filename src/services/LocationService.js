@@ -135,6 +135,21 @@ class LocationService {
     const allowedUsers = this.sharePermissions.get(userId) || new Set();
     return new Set([userId, ...allowedUsers]);
   }
+
+  getSharingStatus(userId) {
+    const sharedWith = Array.from(this.sharePermissions.get(userId) || []);
+    const receivedFrom = [];
+    
+    for (const [fromUser, targets] of this.sharePermissions.entries()) {
+      if (targets.has(userId)) {
+        receivedFrom.push(fromUser);
+      }
+    }
+    
+    return sharedWith.length > 0 || receivedFrom.length > 0
+      ? { sharedWith, receivedFrom }
+      : null;
+  }
 }
 
 module.exports = LocationService;

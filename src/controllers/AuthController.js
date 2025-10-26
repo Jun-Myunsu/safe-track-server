@@ -13,11 +13,15 @@ class AuthController {
    */
   restoreShareState(socket, userId) {
     const user = this.userService.getOnlineUser(userId);
-    if (!user) return;
+    if (!user) {
+      console.log(`❌ restoreShareState: 사용자 없음 - ${userId}`);
+      return;
+    }
 
     // 내가 공유하고 있는 사용자 목록
     const sharedUsers = [];
     const sharePermissions = this.locationService.getSharedUsers(userId);
+    console.log(`📊 ${userId}의 공유 권한:`, sharePermissions);
     if (sharePermissions) {
       sharePermissions.forEach(targetUserId => {
         const targetUser = this.userService.getOnlineUser(targetUserId);
@@ -36,6 +40,8 @@ class AuthController {
         receivedShares.push({ id: otherUser.id, name: otherUser.id });
       }
     });
+
+    console.log(`✅ restoreState 발송 - ${userId}:`, { sharedUsers, receivedShares });
 
     // 추적 상태는 항상 false로 시작 (수동 시작 필요)
     socket.emit('restoreState', {
