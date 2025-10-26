@@ -127,11 +127,25 @@ class SafeTrackServer {
 
     this.app.post("/api/amber", async (req, res) => {
       try {
+        const esntlId = process.env.SAFE182_ESNTL_ID;
+        const authKey = process.env.SAFE182_AUTH_KEY;
+        
+        console.log('API 키 확인:', { esntlId: esntlId ? '설정됨' : '없음', authKey: authKey ? '설정됨' : '없음' });
+        
+        if (!esntlId || !authKey) {
+          console.error('API 키 누락:', { esntlId, authKey });
+          return res.status(500).json({ error: "서버에 API 키가 설정되지 않았습니다" });
+        }
+        
         const params = new URLSearchParams();
+        params.append("esntlId", esntlId);
+        params.append("authKey", authKey);
+        
         for (const [k, v] of Object.entries(req.body || {})) {
           if (Array.isArray(v)) v.forEach((vv) => params.append(k, vv));
           else params.append(k, v ?? "");
         }
+        
         const response = await fetch("https://www.safe182.go.kr/api/lcm/amberList.do", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
@@ -140,8 +154,8 @@ class SafeTrackServer {
         const text = await response.text();
         res.type("application/json").send(text);
       } catch (error) {
-        console.error("실종자 데이터 로드 실패:", error);
-        res.status(500).json({ error: "실종자 데이터 로드 실패" });
+        console.error("실종자 데이터 로드 실패:", error.message || error);
+        res.status(500).json({ error: "실종자 데이터 로드 실패: " + (error.message || error) });
       }
     });
   }
