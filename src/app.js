@@ -252,9 +252,13 @@ class SafeTrackServer {
    * 백그라운드 작업 시작
    */
   startBackgroundTasks() {
-    this.startSessionCleanup();
-    this.keepAliveService.start();
-    this.locationLogService.startStuckUserCheck();
+    try {
+      this.startSessionCleanup();
+      this.keepAliveService.start();
+      this.locationLogService.startStuckUserCheck();
+    } catch (error) {
+      console.error("백그라운드 작업 시작 실패:", error);
+    }
   }
 
   /**
