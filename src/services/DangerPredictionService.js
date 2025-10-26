@@ -33,6 +33,11 @@ class DangerPredictionService {
 해당 지점(또는 경로)의 현재 위험도를 정량·정성적으로 평가하고, 지도를 위한 시각화 정보와
 행동 권고를 편향 없이 생성하는 것입니다.
 
+**중요: 분석 범위는 현재 위치 기준 반경 1km(1000m) 이내로 제한합니다.**
+- 1km를 초과하는 거리의 시설, 사건, 요인은 분석에서 제외합니다.
+- heat.contributors의 모든 요인은 반드시 1km 이내에 위치해야 합니다.
+- 거리 정보가 없는 경우 1km 이내로 가정하지 말고 data_gaps에 명시합니다.
+
 핵심 원칙
 - 환경·맥락 기반: 조명, 유동인구, 교통량, 시간대, 영업 중 시설, CCTV/가로등 밀도, 날씨, 이벤트,
   신고/사고 이력(개인/집단 특성 제외), 지형(골목/공터/하천변) 등 환경 요인만 고려합니다.
@@ -349,6 +354,11 @@ class DangerPredictionService {
 중요: heat.contributors에 반드시 위험도를 높이는 요인(score_delta > 0)과 낮추는 요인(score_delta < 0) 모두 포함하세요.
 예: [{"name": "조명 부족", "score_delta": 15, "rationale": "..."}, {"name": "CCTV 다수", "score_delta": -12, "rationale": "..."}]
 
+**분석 범위 제한: 반경 1km(1000m) 이내만 분석**
+- 모든 시설, 사건, 요인은 현재 위치에서 1km 이내에 있어야 합니다.
+- 1km를 초과하는 요인은 무시하고, rationale에 거리를 명시하세요.
+- 거리 정보가 제공되지 않은 요인은 data_gaps에 "거리 정보 부족"으로 기록하세요.
+
 ${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafetyData ? '\n\n**중요 - 안전지도 데이터 활성화**:\n' + (hasCrimeZoneData ? '- 범죄주의구간(성폭력): 실제 범죄 통계 기반 위험 지역 표시 중. 해당 지역의 위험도를 +15~25 상향 조정하고, 특히 야간에는 더욱 주의 필요. recommendations에 "범죄주의구간 표시 지역입니다. 가능한 우회하세요" 포함.\n' : '') + (hasSecurityFacilities ? '- 치안시설: 경찰서, CCTV 등 치안시설 위치 표시 중. 해당 시설 근처는 안전도가 높으므로 score를 -10~-15 하향 조정. recommendations에 "근처에 치안시설이 있습니다" 포함.\n' : '') + (hasEmergencyBells ? '- 안전비상벨: 비상벨 위치 표시 중. 비상벨 근처는 안전도가 높으므로 score를 -8~-12 하향 조정. recommendations에 "근처에 안전비상벨이 있습니다" 포함.\n' : '') + (hasWomenSafetyData ? '- 여성밤길치안안전: 여성 야간 안전 취약 지역 표시 중. 해당 지역의 위험도를 +10~20 상향 조정, 특히 야간 시간대에 더욱 주의. recommendations에 "여성 야간 취약 지역입니다. 밝은 곳으로 이동하세요" 포함.\n' : '') + '\n이 데이터들을 종합하여 위험도를 정확하게 평가하세요.' : ''}
 
 ` + JSON.stringify(userPayload),
@@ -397,7 +407,7 @@ ${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafe
       this.reconcileLevelStyles(modelJson); // 색상/반경을 레벨과 절대 동기화
 
       // ====== 레거시 포맷으로도 변환(하위 호환) ======
-      const legacy = this.toLegacyFormat(modelJson);
+      const legacy = this.toLegacyFormat(modelJson, emergencyFacilities);
 
       console.log(`\n최종 결과: overallRiskLevel=${legacy.overallRiskLevel}, zones=${legacy.dangerZones.length}개`);
       console.log(`Zone levels: ${legacy.dangerZones.map(z => z.riskLevel).join(', ')}`);
@@ -566,14 +576,14 @@ ${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafe
   }
 
   /**
-   * 새 스키마(JSON) → 기존 포맷(legacy) 변환
+   * 새 스키마(JSON) → 기존 포맷(legacy) 변환 (응급시설 기반 동적 생성)
    * legacy:
    *  - overallRiskLevel: "low|medium|high|critical|safe"
    *  - dangerZones: [{lat,lng,radius,riskLevel,reason,recommendations[]}]
    *  - safetyTips: [string]
    *  - analysisTimestamp: iso
    */
-  toLegacyFormat(modelJson) {
+  toLegacyFormat(modelJson, emergencyFacilities = {}) {
     const levelMap = {
       LOW: "low",
       MEDIUM: "medium",
@@ -583,7 +593,7 @@ ${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafe
 
     const overallRiskLevel = levelMap[modelJson.risk.level] || "low";
 
-    // 중심점 1개 + heat/segments 보조 → 5~7개로 구성
+    // 중심점 (현재 위치)
     const center = {
       lat: modelJson.location.lat,
       lng: modelJson.location.lng,
@@ -595,89 +605,104 @@ ${hasCrimeZoneData || hasSecurityFacilities || hasEmergencyBells || hasWomenSafe
       recommendations: (modelJson.guidance.immediate_actions || []).slice(0, 3),
     };
 
-    // heat.contributors 기반 주변 포인트 (위험/안전 지역 모두 포함)
+    const zones = [center];
     const contributors = modelJson.heat?.contributors || [];
-    const extras = contributors
-      .slice(0, 5)
-      .map((h, i) => {
-        const dMeters = 200 + i * 70; // 200~480m
-        const bearing = (i * Math.PI * 2) / 5; // 균등 분포
-        const off = offsetLatLng(center.lat, center.lng, dMeters, bearing);
-        const delta = Number(h.score_delta || 0);
 
-        // score_delta 기반 위험도 결정
-        let lv;
-        if (delta >= 30) lv = "critical";
-        else if (delta >= 15) lv = "high";
-        else if (delta >= 5) lv = "medium";
-        else if (delta <= -10) lv = "safe"; // 안전 지역
-        else lv = "low";
+    // 1. heat.contributors 기반 위험/안전 지역 생성 (실제 거리 정보 활용)
+    contributors.slice(0, 4).forEach((h, i) => {
+      const delta = Number(h.score_delta || 0);
+      
+      // rationale에서 거리 정보 추출 시도 (예: "200m 이내", "500m")
+      const distMatch = (h.rationale || "").match(/(\d+)\s*m/);
+      const distance = distMatch ? parseInt(distMatch[1]) : 300 + i * 100;
+      
+      // 1km 이내로 제한
+      const limitedDistance = Math.min(distance, 1000);
+      const bearing = (i * Math.PI * 2) / 4; // 4방향 분산
+      const off = offsetLatLng(center.lat, center.lng, limitedDistance, bearing);
 
-        return {
-          lat: off.lat,
-          lng: off.lng,
-          radius: clamp(
-            Math.round(modelJson.map.radius_m * (lv === "safe" ? 0.9 : 1.1)),
-            180,
-            500
-          ),
-          riskLevel: lv,
-          reason: h.rationale || h.name || "요인 기반 가중치",
-          recommendations:
-            delta >= 10
-              ? [
-                  modelJson.guidance.route_advice ||
-                    "밝은 길/혼잡 지역으로 경로 조정",
-                ]
-              : delta <= -10
-              ? [
-                  "안전한 지역입니다",
-                  modelJson.guidance.meeting_point || "대기 장소로 적합",
-                ]
-              : ["일반적인 주의가 필요합니다"],
-        };
+      let lv;
+      if (delta >= 30) lv = "critical";
+      else if (delta >= 15) lv = "high";
+      else if (delta >= 5) lv = "medium";
+      else if (delta <= -10) lv = "safe";
+      else lv = "low";
+
+      zones.push({
+        lat: off.lat,
+        lng: off.lng,
+        radius: clamp(Math.round(200 + Math.abs(delta) * 5), 150, 400),
+        riskLevel: lv,
+        reason: h.rationale || h.name || "요인 기반 평가",
+        recommendations:
+          delta >= 10
+            ? [modelJson.guidance.route_advice || "밝은 길로 이동하세요"]
+            : delta <= -10
+            ? ["안전한 지역입니다", "대기 장소로 적합"]
+            : ["일반적인 주의 필요"],
       });
+    });
 
-    // 가장 안전한 지역 추가
-    const safestContributor = contributors.reduce((min, curr) => 
-      (curr.score_delta || 0) < (min.score_delta || 0) ? curr : min
-    , contributors[0] || { score_delta: 0 });
-    
-    // AI가 음수 score_delta를 제공하면 사용, 아니면 낮은 위험도 기반으로 생성
-    let shouldAddSafest = false;
-    let safestReason = "";
-    
-    if (safestContributor && safestContributor.score_delta <= 0) {
-      shouldAddSafest = true;
-      safestReason = safestContributor.rationale || safestContributor.name || "안전 요인 다수";
-    } else if (modelJson.risk.level === "LOW" || modelJson.risk.score < 30) {
-      shouldAddSafest = true;
-      safestReason = "전반적으로 안전한 지역입니다";
-    }
-    
-    if (shouldAddSafest) {
-      const safestOff = offsetLatLng(center.lat, center.lng, 350, Math.PI / 3);
-      extras.push({
-        lat: safestOff.lat,
-        lng: safestOff.lng,
-        radius: 250,
-        riskLevel: "safest",
-        reason: `가장 안전한 지역: ${safestReason}`,
+    // 2. 응급시설 기반 안전 지역 추가 (실제 위치 사용)
+    const allFacilities = [
+      ...(emergencyFacilities.police || []).map(f => ({ ...f, type: 'police', safety: -20 })),
+      ...(emergencyFacilities.hospitals || []).map(f => ({ ...f, type: 'hospital', safety: -10 })),
+      ...(emergencyFacilities.stations || []).map(f => ({ ...f, type: 'station', safety: -8 })),
+    ];
+
+    // 현재 위치에서 가까운 시설 2개 선택 (1km 이내)
+    const nearbyFacilities = allFacilities
+      .map(f => ({
+        ...f,
+        distance: calculateDistance(center.lat, center.lng, f.lat, f.lng)
+      }))
+      .filter(f => f.distance <= 1000)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 2);
+
+    nearbyFacilities.forEach(facility => {
+      const facilityName = facility.type === 'police' ? '경찰서' : 
+                          facility.type === 'hospital' ? '병원' : '지하철역';
+      zones.push({
+        lat: facility.lat,
+        lng: facility.lng,
+        radius: 200,
+        riskLevel: "safe",
+        reason: `${facilityName} 근처 (${Math.round(facility.distance)}m) - 안전 지역`,
         recommendations: [
-          "✓ 가장 안전한 지역입니다",
-          "대기 또는 만남의 장소로 추천합니다",
-          modelJson.guidance.meeting_point || "이동 시 이 방향을 고려하세요"
+          `✓ ${facilityName}이 가까워 안전합니다`,
+          "비상시 이곳으로 이동하세요"
         ]
       });
+    });
+
+    // 3. 가장 안전한 방향 추가 (응급시설이 없으면 AI 판단 기반)
+    if (nearbyFacilities.length === 0) {
+      const safestContributor = contributors.find(c => (c.score_delta || 0) <= -10);
+      if (safestContributor || modelJson.risk.level === "LOW") {
+        const safestOff = offsetLatLng(center.lat, center.lng, 400, Math.PI / 4);
+        zones.push({
+          lat: safestOff.lat,
+          lng: safestOff.lng,
+          radius: 250,
+          riskLevel: "safest",
+          reason: safestContributor?.rationale || "전반적으로 안전한 지역",
+          recommendations: [
+            "✓ 안전한 지역입니다",
+            modelJson.guidance.meeting_point || "대기 장소로 추천"
+          ]
+        });
+      }
     }
 
-    // 최소 5개~최대 8개 유지 (중심 + 주변 + 가장 안전한 곳)
-    const zones = [center, ...extras].slice(0, 8);
-    while (zones.length < 5) zones.push({ ...center, radius: center.radius });
+    // 최소 3개 보장 (너무 많으면 혼란)
+    while (zones.length < 3) {
+      zones.push({ ...center, radius: center.radius - 50 });
+    }
 
     return {
       overallRiskLevel,
-      dangerZones: zones,
+      dangerZones: zones.slice(0, 7), // 최대 7개로 제한
       safetyTips: (modelJson.guidance.immediate_actions || []).slice(0, 5),
       analysisTimestamp:
         modelJson.context?.timestamp_local || new Date().toISOString(),
