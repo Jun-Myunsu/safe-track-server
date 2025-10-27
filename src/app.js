@@ -150,6 +150,7 @@ class SafeTrackServer {
         });
 
         const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
+        console.log('CCTV API 요청:', url.substring(0, 100));
         
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
@@ -157,10 +158,14 @@ class SafeTrackServer {
         try {
           const response = await fetch(url, {
             method: 'GET',
-            headers: { 'Accept': 'application/json' },
+            headers: { 
+              'Accept': 'application/json',
+              'User-Agent': 'SafeTrack/1.0'
+            },
             signal: controller.signal
           });
           clearTimeout(timeout);
+          console.log('CCTV API 응답 상태:', response.status);
           
           if (!response.ok) {
             console.error('CCTV API HTTP 에러:', response.status);
@@ -182,8 +187,12 @@ class SafeTrackServer {
           throw fetchError;
         }
       } catch (error) {
-        console.error("CCTV 데이터 로드 실패:", error.message);
-        res.status(500).json({ error: "CCTV API 연결 실패" });
+        console.error("CCTV 데이터 로드 실패:", error.message, error.cause);
+        res.status(500).json({ 
+          error: "CCTV API 연결 실패",
+          details: error.message,
+          code: error.code
+        });
       }
     });
 
