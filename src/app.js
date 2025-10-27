@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
+const https = require("https");
 const socketIo = require("socket.io");
 
 const config = require("./config/server");
@@ -128,64 +129,79 @@ class SafeTrackServer {
     this.app.get("/api/cctv", async (req, res) => {
       const MAX_RETRIES = 3;
       const RETRY_DELAY = 2000; // 2초
+      const CONNECT_TIMEOUT = 90000; // 90초 연결 타임아웃
+      const REQUEST_TIMEOUT = 120000; // 120초 요청 타임아웃
 
-      // 재시도 로직을 포함한 fetch 함수
-      const fetchWithRetry = async (url, options, retryCount = 0) => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => {
-          console.log(`CCTV API 요청 타임아웃 (60초 초과) - 시도 ${retryCount + 1}/${MAX_RETRIES}`);
-          controller.abort();
-        }, 60000);
-
-        try {
+      // https.request를 Promise로 래핑하여 재시도 로직 적용
+      const httpsRequestWithRetry = async (options, retryCount = 0) => {
+        return new Promise((resolve, reject) => {
           console.log(`CCTV API 요청 시도 ${retryCount + 1}/${MAX_RETRIES}:`, new Date().toISOString());
 
-          const response = await fetch(url, {
-            ...options,
-            signal: controller.signal
+          const req = https.request(options, (response) => {
+            let data = '';
+
+            response.on('data', (chunk) => {
+              data += chunk;
+            });
+
+            response.on('end', () => {
+              try {
+                const jsonData = JSON.parse(data);
+                console.log('CCTV API 응답 수신:', new Date().toISOString());
+                resolve(jsonData);
+              } catch (parseError) {
+                reject(new Error(`JSON 파싱 실패: ${parseError.message}`));
+              }
+            });
           });
 
-          clearTimeout(timeoutId);
+          // 연결 타임아웃 설정 (90초)
+          req.setTimeout(CONNECT_TIMEOUT);
 
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
+          let timeoutOccurred = false;
 
-          console.log('CCTV API 응답 수신:', new Date().toISOString());
-          return await response.json();
-
-        } catch (fetchError) {
-          clearTimeout(timeoutId);
-
-          // 에러 상세 정보 로깅
-          console.error(`CCTV API 요청 실패 (시도 ${retryCount + 1}/${MAX_RETRIES}):`, {
-            message: fetchError.message,
-            name: fetchError.name,
-            code: fetchError.code,
-            cause: fetchError.cause?.message || fetchError.cause,
-            stack: fetchError.stack?.split('\n').slice(0, 3).join('\n')
+          req.on('timeout', () => {
+            console.log(`CCTV API 요청 타임아웃 (${CONNECT_TIMEOUT}ms) - 시도 ${retryCount + 1}/${MAX_RETRIES}`);
+            timeoutOccurred = true;
+            req.destroy();
           });
 
-          // 재시도 가능한 에러인지 확인
-          const isRetryable =
-            fetchError.name === 'AbortError' ||
-            fetchError.name === 'TypeError' ||
-            fetchError.code === 'ECONNRESET' ||
-            fetchError.code === 'ETIMEDOUT' ||
-            fetchError.code === 'ENOTFOUND';
+          req.on('error', async (error) => {
+            console.error(`CCTV API 요청 실패 (시도 ${retryCount + 1}/${MAX_RETRIES}):`, {
+              message: error.message,
+              name: error.name,
+              code: error.code,
+              timeout: timeoutOccurred
+            });
 
-          if (isRetryable && retryCount < MAX_RETRIES - 1) {
-            console.log(`${RETRY_DELAY}ms 후 재시도...`);
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-            return fetchWithRetry(url, options, retryCount + 1);
-          }
+            // 재시도 가능한 에러인지 확인
+            const isRetryable =
+              timeoutOccurred ||
+              error.code === 'ECONNRESET' ||
+              error.code === 'ETIMEDOUT' ||
+              error.code === 'ENOTFOUND' ||
+              error.code === 'ECONNREFUSED';
 
-          // 재시도 불가능하거나 최대 재시도 횟수 초과
-          if (fetchError.name === 'AbortError') {
-            throw new Error('요청 타임아웃 (60초 초과)');
-          }
-          throw fetchError;
-        }
+            if (isRetryable && retryCount < MAX_RETRIES - 1) {
+              console.log(`${RETRY_DELAY}ms 후 재시도...`);
+              await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+              try {
+                const result = await httpsRequestWithRetry(options, retryCount + 1);
+                resolve(result);
+              } catch (retryError) {
+                reject(retryError);
+              }
+            } else {
+              if (timeoutOccurred) {
+                reject(new Error(`요청 타임아웃 (${CONNECT_TIMEOUT}ms 초과)`));
+              } else {
+                reject(error);
+              }
+            }
+          });
+
+          req.end();
+        });
       };
 
       try {
@@ -211,18 +227,30 @@ class SafeTrackServer {
           getType: 'json'
         });
 
-        const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
-        console.log('CCTV API 요청 시작:', {
-          url: 'https://openapi.its.go.kr:9443/cctvInfo',
-          timestamp: new Date().toISOString()
-        });
-
-        const data = await fetchWithRetry(url, {
+        const options = {
+          hostname: 'openapi.its.go.kr',
+          port: 9443,
+          path: `/cctvInfo?${params}`,
+          method: 'GET',
           headers: {
             'Accept': 'application/json',
             'User-Agent': 'SafeTrack/1.0'
-          }
+          },
+          // Agent 설정으로 연결 유지 및 타임아웃 제어
+          agent: new https.Agent({
+            keepAlive: false,
+            timeout: CONNECT_TIMEOUT
+          })
+        };
+
+        console.log('CCTV API 요청 시작:', {
+          hostname: options.hostname,
+          port: options.port,
+          connectTimeout: CONNECT_TIMEOUT,
+          timestamp: new Date().toISOString()
         });
+
+        const data = await httpsRequestWithRetry(options);
 
         if (data.response && data.response.data) {
           const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
@@ -236,8 +264,7 @@ class SafeTrackServer {
         console.error("CCTV 데이터 로드 실패 (최종):", {
           message: error.message,
           name: error.name,
-          code: error.code,
-          cause: error.cause
+          code: error.code
         });
         res.status(500).json({
           error: "CCTV API 연결 실패",
