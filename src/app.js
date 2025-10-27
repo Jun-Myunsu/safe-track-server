@@ -150,31 +150,40 @@ class SafeTrackServer {
         });
 
         const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
-        console.log('CCTV API 요청:', url.substring(0, 100));
         
-        const response = await fetch(url, {
-          method: 'GET',
-          headers: { 'Accept': 'application/json' }
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
         
-        if (!response.ok) {
-          console.error('CCTV API HTTP 에러:', response.status, response.statusText);
-          return res.status(500).json({ error: `CCTV API 에러: ${response.status}` });
-        }
-        
-        const data = await response.json();
-        
-        if (data.response && data.response.data) {
-          const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
-          items.forEach(item => item.cctvType = '4');
-          console.log(`${items.length}개 CCTV 발견`);
-          res.json({ response: { data: items } });
-        } else {
-          res.json({ response: { data: [] } });
+        try {
+          const response = await fetch(url, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' },
+            signal: controller.signal
+          });
+          clearTimeout(timeout);
+          
+          if (!response.ok) {
+            console.error('CCTV API HTTP 에러:', response.status);
+            return res.status(500).json({ error: `CCTV API 에러: ${response.status}` });
+          }
+          
+          const data = await response.json();
+          
+          if (data.response && data.response.data) {
+            const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
+            items.forEach(item => item.cctvType = '4');
+            console.log(`${items.length}개 CCTV 발견`);
+            res.json({ response: { data: items } });
+          } else {
+            res.json({ response: { data: [] } });
+          }
+        } catch (fetchError) {
+          clearTimeout(timeout);
+          throw fetchError;
         }
       } catch (error) {
-        console.error("CCTV 데이터 로드 실패:", error.message, error.cause);
-        res.status(500).json({ error: "CCTV 데이터 로드 실패: " + error.message });
+        console.error("CCTV 데이터 로드 실패:", error.message);
+        res.status(500).json({ error: "CCTV API 연결 실패" });
       }
     });
 
