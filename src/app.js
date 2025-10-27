@@ -129,6 +129,7 @@ class SafeTrackServer {
       try {
         const apiKey = process.env.ITS_API_KEY;
         if (!apiKey) {
+          console.error('ITS_API_KEY 환경변수 누락');
           return res.status(500).json({ error: "서버에 CCTV API 키가 설정되지 않았습니다" });
         }
 
@@ -148,27 +149,32 @@ class SafeTrackServer {
           getType: 'json'
         });
 
-        const response = await fetch(`https://openapi.its.go.kr:9443/cctvInfo?${params}`);
+        const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
+        console.log('CCTV API 요청:', url.substring(0, 100));
+        
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' }
+        });
+        
+        if (!response.ok) {
+          console.error('CCTV API HTTP 에러:', response.status, response.statusText);
+          return res.status(500).json({ error: `CCTV API 에러: ${response.status}` });
+        }
+        
         const data = await response.json();
         
         if (data.response && data.response.data) {
           const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
           items.forEach(item => item.cctvType = '4');
-          console.log(`현재 지도 영역에서 ${items.length}개 CCTV 발견`);
-          if (items.length > 0) {
-            console.log('CCTV 샘플:', {
-              name: items[0].cctvname,
-              format: items[0].cctvformat,
-              url: items[0].cctvurl?.substring(0, 80)
-            });
-          }
+          console.log(`${items.length}개 CCTV 발견`);
           res.json({ response: { data: items } });
         } else {
           res.json({ response: { data: [] } });
         }
       } catch (error) {
-        console.error("CCTV 데이터 로드 실패:", error.message || error);
-        res.status(500).json({ error: "CCTV 데이터 로드 실패" });
+        console.error("CCTV 데이터 로드 실패:", error.message, error.cause);
+        res.status(500).json({ error: "CCTV 데이터 로드 실패: " + error.message });
       }
     });
 
