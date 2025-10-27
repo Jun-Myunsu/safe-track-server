@@ -126,6 +126,68 @@ class SafeTrackServer {
     });
 
     this.app.get("/api/cctv", async (req, res) => {
+      const MAX_RETRIES = 3;
+      const RETRY_DELAY = 2000; // 2초
+
+      // 재시도 로직을 포함한 fetch 함수
+      const fetchWithRetry = async (url, options, retryCount = 0) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => {
+          console.log(`CCTV API 요청 타임아웃 (60초 초과) - 시도 ${retryCount + 1}/${MAX_RETRIES}`);
+          controller.abort();
+        }, 60000);
+
+        try {
+          console.log(`CCTV API 요청 시도 ${retryCount + 1}/${MAX_RETRIES}:`, new Date().toISOString());
+
+          const response = await fetch(url, {
+            ...options,
+            signal: controller.signal
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          console.log('CCTV API 응답 수신:', new Date().toISOString());
+          return await response.json();
+
+        } catch (fetchError) {
+          clearTimeout(timeoutId);
+
+          // 에러 상세 정보 로깅
+          console.error(`CCTV API 요청 실패 (시도 ${retryCount + 1}/${MAX_RETRIES}):`, {
+            message: fetchError.message,
+            name: fetchError.name,
+            code: fetchError.code,
+            cause: fetchError.cause?.message || fetchError.cause,
+            stack: fetchError.stack?.split('\n').slice(0, 3).join('\n')
+          });
+
+          // 재시도 가능한 에러인지 확인
+          const isRetryable =
+            fetchError.name === 'AbortError' ||
+            fetchError.name === 'TypeError' ||
+            fetchError.code === 'ECONNRESET' ||
+            fetchError.code === 'ETIMEDOUT' ||
+            fetchError.code === 'ENOTFOUND';
+
+          if (isRetryable && retryCount < MAX_RETRIES - 1) {
+            console.log(`${RETRY_DELAY}ms 후 재시도...`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+            return fetchWithRetry(url, options, retryCount + 1);
+          }
+
+          // 재시도 불가능하거나 최대 재시도 횟수 초과
+          if (fetchError.name === 'AbortError') {
+            throw new Error('요청 타임아웃 (60초 초과)');
+          }
+          throw fetchError;
+        }
+      };
+
       try {
         const apiKey = process.env.ITS_API_KEY;
         if (!apiKey) {
@@ -150,54 +212,32 @@ class SafeTrackServer {
         });
 
         const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
-        console.log('CCTV API 요청 시작:', new Date().toISOString());
+        console.log('CCTV API 요청 시작:', {
+          url: 'https://openapi.its.go.kr:9443/cctvInfo',
+          timestamp: new Date().toISOString()
+        });
 
-        // AbortController로 타임아웃 제어 (60초)
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => {
-          console.log('CCTV API 요청 타임아웃 (60초 초과)');
-          controller.abort();
-        }, 60000);
-
-        try {
-          const response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-              'Accept': 'application/json',
-              'User-Agent': 'SafeTrack/1.0'
-            }
-          });
-
-          clearTimeout(timeoutId);
-
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const data = await fetchWithRetry(url, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'SafeTrack/1.0'
           }
+        });
 
-          const data = await response.json();
-          console.log('CCTV API 응답 수신:', new Date().toISOString());
-
-          if (data.response && data.response.data) {
-            const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
-            items.forEach(item => item.cctvType = '4');
-            console.log(`${items.length}개 CCTV 발견`);
-            res.json({ response: { data: items } });
-          } else {
-            res.json({ response: { data: [] } });
-          }
-        } catch (fetchError) {
-          clearTimeout(timeoutId);
-
-          if (fetchError.name === 'AbortError') {
-            throw new Error('요청 타임아웃 (60초 초과)');
-          }
-          throw fetchError;
+        if (data.response && data.response.data) {
+          const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
+          items.forEach(item => item.cctvType = '4');
+          console.log(`${items.length}개 CCTV 발견`);
+          res.json({ response: { data: items } });
+        } else {
+          res.json({ response: { data: [] } });
         }
       } catch (error) {
-        console.error("CCTV 데이터 로드 실패:", {
+        console.error("CCTV 데이터 로드 실패 (최종):", {
           message: error.message,
           name: error.name,
-          stack: error.stack?.split('\n')[0]
+          code: error.code,
+          cause: error.cause
         });
         res.status(500).json({
           error: "CCTV API 연결 실패",
