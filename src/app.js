@@ -1,7 +1,6 @@
 require("dotenv").config();
 const express = require("express");
 const http = require("http");
-const https = require("https");
 const socketIo = require("socket.io");
 
 const config = require("./config/server");
@@ -151,59 +150,59 @@ class SafeTrackServer {
         });
 
         const url = `https://openapi.its.go.kr:9443/cctvInfo?${params}`;
-        console.log('CCTV API 요청 시작');
-        
-        const options = {
-          hostname: 'openapi.its.go.kr',
-          port: 9443,
-          path: `/cctvInfo?${params}`,
-          method: 'GET',
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'SafeTrack/1.0'
-          },
-          timeout: 30000
-        };
-        
-        const httpsRequest = new Promise((resolve, reject) => {
-          const req = https.request(options, (response) => {
-            let data = '';
-            response.on('data', (chunk) => data += chunk);
-            response.on('end', () => {
-              try {
-                resolve(JSON.parse(data));
-              } catch (e) {
-                reject(new Error('JSON 파싱 실패'));
-              }
-            });
+        console.log('CCTV API 요청 시작:', new Date().toISOString());
+
+        // AbortController로 타임아웃 제어 (60초)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => {
+          console.log('CCTV API 요청 타임아웃 (60초 초과)');
+          controller.abort();
+        }, 60000);
+
+        try {
+          const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'SafeTrack/1.0'
+            }
           });
-          
-          req.on('error', reject);
-          req.on('timeout', () => {
-            req.destroy();
-            reject(new Error('요청 타임아웃'));
-          });
-          
-          req.end();
-        });
-        
-        const data = await httpsRequest;
-        console.log('CCTV API 응답 수신');
-        
-        if (data.response && data.response.data) {
-          const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
-          items.forEach(item => item.cctvType = '4');
-          console.log(`${items.length}개 CCTV 발견`);
-          res.json({ response: { data: items } });
-        } else {
-          res.json({ response: { data: [] } });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const data = await response.json();
+          console.log('CCTV API 응답 수신:', new Date().toISOString());
+
+          if (data.response && data.response.data) {
+            const items = Array.isArray(data.response.data) ? data.response.data : [data.response.data];
+            items.forEach(item => item.cctvType = '4');
+            console.log(`${items.length}개 CCTV 발견`);
+            res.json({ response: { data: items } });
+          } else {
+            res.json({ response: { data: [] } });
+          }
+        } catch (fetchError) {
+          clearTimeout(timeoutId);
+
+          if (fetchError.name === 'AbortError') {
+            throw new Error('요청 타임아웃 (60초 초과)');
+          }
+          throw fetchError;
         }
       } catch (error) {
-        console.error("CCTV 데이터 로드 실패:", error.message, error.cause);
-        res.status(500).json({ 
+        console.error("CCTV 데이터 로드 실패:", {
+          message: error.message,
+          name: error.name,
+          stack: error.stack?.split('\n')[0]
+        });
+        res.status(500).json({
           error: "CCTV API 연결 실패",
           details: error.message,
-          code: error.code
+          errorType: error.name
         });
       }
     });
