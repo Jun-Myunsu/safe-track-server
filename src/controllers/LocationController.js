@@ -121,6 +121,15 @@ class LocationController {
       return;
     }
 
+    // 공유 중인 사용자들에게 위치 제거 알림
+    const allowedUsers = this.locationService.getAllowedUsers(socketUserId);
+    allowedUsers.forEach((targetUserId) => {
+      const targetUser = this.userService.getOnlineUser(targetUserId);
+      if (targetUser) {
+        this.io.to(targetUser.socketId).emit('locationRemoved', { userId: socketUserId });
+      }
+    });
+
     this.userService.setUserTracking(socketUserId, false);
     this.locationService.removeLocation(socketUserId);
     socket.emit('trackingStopped', { userId: socketUserId });

@@ -158,6 +158,37 @@ class SafeTrackServer {
         res.status(500).json({ error: "실종자 데이터 로드 실패: " + (error.message || error) });
       }
     });
+
+    this.app.get("/api/road-events", async (req, res) => {
+      try {
+        const apiKey = process.env.ITS_EVENT_API_KEY || "28175bd0fa394ce9abdf8a19dbaaf0f9";
+        const { minX, minY, maxX, maxY } = req.query;
+        
+        const url = `https://openapi.its.go.kr/api/NEventIdentity?apiKey=${apiKey}&type=all&eventType=all&minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}&getType=json`;
+        console.log('🚨 ITS API 호출:', url);
+        
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        
+        const text = await response.text();
+        console.log('🚨 ITS API Raw 응답:', text.substring(0, 200));
+        
+        const data = JSON.parse(text);
+        console.log('🚨 ITS API 파싱 결과:', { 
+          resultCode: data.resultCode, 
+          resultMsg: data.resultMsg,
+          itemCount: data.body?.items?.length || 0 
+        });
+        
+        res.json(data);
+      } catch (error) {
+        console.error("❌ 돌발정보 로드 실패:", error.message || error);
+        res.status(500).json({ error: "돌발정보 로드 실패", message: error.message });
+      }
+    });
   }
 
   /**
