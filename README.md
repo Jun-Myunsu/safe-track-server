@@ -34,3 +34,20 @@ npm start
 ```javascript
 const serverUrl = 'https://your-render-app.onrender.com'
 ```
+
+## 라이선스
+
+Copyright (c) 2025 Safe Track. All Rights Reserved.
+
+이 소프트웨어는 독점 라이선스(Proprietary License)로 보호됩니다.
+
+**제한 사항:**
+- 상업적 사용 금지
+- 수정 및 배포 금지
+- 역공학 금지
+
+**허용 사항:**
+- 개인적, 비상업적 목적의 열람 및 학습
+- 저작권자의 명시적 서면 허가가 있는 경우에 한해 사용 가능
+
+자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
