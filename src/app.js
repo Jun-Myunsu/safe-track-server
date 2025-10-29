@@ -161,17 +161,21 @@ class SafeTrackServer {
 
     this.app.get("/api/road-events", async (req, res) => {
       try {
-        const apiKey = process.env.ITS_EVENT_API_KEY || "28175bd0fa394ce9abdf8a19dbaaf0f9";
+        const apiKey = process.env.ITS_API_KEY || "28175bd0fa394ce9abdf8a19dbaaf0f9";
         const { minX, minY, maxX, maxY } = req.query;
         
-        const url = `https://openapi.its.go.kr/api/NEventIdentity?apiKey=${apiKey}&type=all&eventType=all&minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}&getType=json`;
+        const url = `https://openapi.its.go.kr:9443/eventInfo?apiKey=${apiKey}&type=all&eventType=all&minX=${minX}&maxX=${maxX}&minY=${minY}&maxY=${maxY}&getType=json`;
         console.log('🚨 ITS API 호출:', url);
         
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
+        const timeout = setTimeout(() => controller.abort(), 30000); // 30초로 증가
         
         const response = await fetch(url, { signal: controller.signal });
         clearTimeout(timeout);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
         
         const text = await response.text();
         console.log('🚨 ITS API Raw 응답:', text.substring(0, 200));
@@ -183,10 +187,17 @@ class SafeTrackServer {
           itemCount: data.body?.items?.length || 0 
         });
         
+        // API 에러 코드 처리
+        if (data.resultCode && data.resultCode !== '00') {
+          console.warn('⚠️ ITS API 에러:', data.resultMsg);
+          return res.json({ body: { items: [] }, resultCode: data.resultCode, resultMsg: data.resultMsg });
+        }
+        
         res.json(data);
       } catch (error) {
         console.error("❌ 돌발정보 로드 실패:", error.message || error);
-        res.status(500).json({ error: "돌발정보 로드 실패", message: error.message });
+        // 빈 응답 반환 (클라이언트에서 에러 처리)
+        res.json({ body: { items: [] }, resultCode: '99', resultMsg: error.message });
       }
     });
   }
