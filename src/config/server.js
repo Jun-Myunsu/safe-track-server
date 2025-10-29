@@ -2,10 +2,11 @@ module.exports = {
   port: process.env.PORT || 3000,
   cors: {
     origin: [
-      "https://safe-track-client.vercel.app", 
+      "https://safe-track-client.vercel.app",
       "http://localhost:3001"
     ],
-    methods: ["GET", "POST"]
+    methods: ["GET", "POST"],
+    credentials: true
   },
   session: {
     expiryHours: 24 * 7, // 7 days

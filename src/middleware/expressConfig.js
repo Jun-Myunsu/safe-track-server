@@ -19,9 +19,16 @@ function configureExpressMiddleware(app) {
     const origin = req.headers.origin;
     if (config.cors.origin.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
     }
     res.setHeader('Access-Control-Allow-Methods', config.cors.methods.join(', '));
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+    // Handle preflight OPTIONS requests
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(200);
+    }
+
     next();
   });
 
