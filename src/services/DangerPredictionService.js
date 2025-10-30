@@ -816,14 +816,27 @@ ${
       }
     }
 
-    // 최소 3개 보장 (너무 많으면 혼란)
-    while (zones.length < 3) {
-      zones.push({ ...center, radius: center.radius - 50 });
+    // 중복/겹치는 지역 제거 (거리 500m 이내면 더 위험한 것만 유지)
+    const filtered = [];
+    const riskPriority = { critical: 4, high: 3, medium: 2, low: 1, safe: 0 };
+    
+    for (const zone of zones) {
+      const nearby = filtered.find(f => 
+        calculateDistance(zone.lat, zone.lng, f.lat, f.lng) < 500
+      );
+      
+      if (!nearby) {
+        filtered.push(zone);
+      } else if (riskPriority[zone.riskLevel] > riskPriority[nearby.riskLevel]) {
+        // 더 위험한 것으로 교체
+        const idx = filtered.indexOf(nearby);
+        filtered[idx] = zone;
+      }
     }
 
     return {
       overallRiskLevel,
-      dangerZones: zones.slice(0, 7), // 최대 7개로 제한
+      dangerZones: filtered.slice(0, 5), // 최대 5개로 제한
       safetyTips: (modelJson.guidance.immediate_actions || []).slice(0, 5),
       analysisTimestamp:
         modelJson.context?.timestamp_local || new Date().toISOString(),
