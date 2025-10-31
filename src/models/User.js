@@ -69,6 +69,20 @@ class User {
     if (!user) return false;
     return bcrypt.compare(password, user.password);
   }
+
+  static async updatePassword(userId, newPassword) {
+    try {
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await pool.query(
+        'UPDATE users SET password = $1 WHERE id = $2',
+        [hashedPassword, userId]
+      );
+      return true;
+    } catch (error) {
+      console.error('비밀번호 변경 실패:', error);
+      return false;
+    }
+  }
 }
 
 module.exports = User;

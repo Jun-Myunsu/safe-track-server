@@ -74,17 +74,17 @@ class SafeTrackServer {
 
 
 
-    this.app.post("/api/emergency-tip", async (_req, res) => {
+    this.app.post("/api/safety-stats", async (_req, res) => {
       try {
-        const tip = await this.aiChatService.generateEmergencyTip();
-        res.json(tip);
+        const stats = await this.aiChatService.generateSafetyStats();
+        res.json(stats);
       } catch (error) {
-        console.error("응급 상식 생성 실패:", error.message || error);
+        console.error("안전 통계 생성 실패:", error.message || error);
         res.status(500).json({
-          error: "응급 상식을 불러올 수 없습니다",
-          title: "긴급 연락처",
+          error: "안전 통계를 불러올 수 없습니다",
+          title: "안전 주의보",
           content:
-            "응급상황 시 112(경찰), 119(소방/구급), 1366(여성 긴급전화)로 연락하세요.",
+            "밤길 보행 시 밝은 곳으로 이동하고, 응급상황 시 112(경찰), 119(소방/구급)로 연락하세요.",
         });
       }
     });

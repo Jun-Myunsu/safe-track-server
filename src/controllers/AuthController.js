@@ -182,6 +182,23 @@ class AuthController {
       this.io.emit('userList', this.userService.getAllOnlineUsers());
     }
   }
+
+  async handleChangePassword(socket, data) {
+    try {
+      const { currentPassword, newPassword } = data;
+      const userId = socket.userId;
+
+      if (!userId) {
+        socket.emit('passwordChangeError', { message: '로그인이 필요합니다' });
+        return;
+      }
+
+      await AuthService.changePassword(userId, currentPassword, newPassword);
+      socket.emit('passwordChangeSuccess');
+    } catch (error) {
+      socket.emit('passwordChangeError', { message: error.message });
+    }
+  }
 }
 
 module.exports = AuthController;

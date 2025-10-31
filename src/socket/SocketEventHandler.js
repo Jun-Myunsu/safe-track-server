@@ -93,6 +93,10 @@ class SocketEventHandler {
     socket.on('logout', (data) =>
       authController.handleLogout(socket, data)
     );
+    
+    socket.on('changePassword', (data) =>
+      authController.handleChangePassword(socket, data)
+    );
   }
 
   /**

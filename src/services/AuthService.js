@@ -77,6 +77,28 @@ class AuthService {
   static async deleteSessionByUserId(userId) {
     return Session.deleteByUserId(userId);
   }
+
+  static async changePassword(userId, currentPassword, newPassword) {
+    if (!currentPassword || !newPassword) {
+      throw new Error('현재 비밀번호와 새 비밀번호를 입력하세요');
+    }
+
+    if (newPassword.length < 4) {
+      throw new Error('새 비밀번호는 4자리 이상이어야 합니다');
+    }
+
+    const isValid = await User.validatePassword(userId, currentPassword);
+    if (!isValid) {
+      throw new Error('현재 비밀번호가 일치하지 않습니다');
+    }
+
+    const success = await User.updatePassword(userId, newPassword);
+    if (!success) {
+      throw new Error('비밀번호 변경 중 오류가 발생했습니다');
+    }
+
+    return true;
+  }
 }
 
 module.exports = AuthService;

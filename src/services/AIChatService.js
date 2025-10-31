@@ -186,39 +186,68 @@ class AIChatService {
     };
   }
 
-  async generateEmergencyTip() {
+  async generateSafetyStats() {
     try {
+      const today = new Date();
+      const month = today.getMonth() + 1;
+      const season =
+        month >= 3 && month <= 5
+          ? "봄"
+          : month >= 6 && month <= 8
+          ? "여름"
+          : month >= 9 && month <= 11
+          ? "가을"
+          : "겨울";
+
       const completion = await this.openai.chat.completions.create({
         model: "gpt-4",
         messages: [
           {
             role: "system",
             content:
-              "You are an emergency response expert. Provide practical safety tips in KOREAN language ONLY. All responses must be in Korean.",
+              "당신은 한국의 안전 통계 전문가입니다. 현재 시기에 맞는 실제 사고 통계와 안전 정보를 제공합니다. 반드시 한국어로만 답변하세요.",
           },
           {
             role: "user",
-            content:
-              '한국어로 응급상황 대처 팁을 제공하세요. 제목 1줄과 본문은 3-5문장으로 구체적이고 실용적으로 작성해주세요. 완전한 문장으로 끝내주세요.',
+            content: `오늘은 ${today.getFullYear()}년 ${month}월 ${today.getDate()}일 (${season})입니다. 이 시기에 한국에서 자주 발생하는 안전사고 통계와 조심해야 할 점을 분석해주세요. 다음 형식으로 작성해주세요:
+
+제목: [시기]에 주의해야 할 안전사고
+
+1. 주요 사고 통계 (2-3가지)
+2. 조심해야 할 점 (3-4가지)
+3. 예방 수칙 (2-3가지)
+
+구체적인 수치와 실용적인 조언을 포함하여 400자 이내로 작성해주세요.`,
           },
         ],
-        max_tokens: 500,
+        max_tokens: 600,
         temperature: 0.7,
       });
 
       const response = completion.choices[0].message.content;
-      const lines = response.split('\n').filter(line => line.trim());
-      
+      const lines = response.split("\n").filter((line) => line.trim());
+
       return {
-        title: lines[0] || "응급상황 대처법",
-        content: lines.slice(1).join('\n') || response,
+        title:
+          lines[0].replace("제목:", "").trim() || `${season} 안전사고 통계`,
+        content: lines.slice(1).join("\n") || response,
       };
     } catch (error) {
       console.error("OpenAI API 오류:", error);
+      const today = new Date();
+      const month = today.getMonth() + 1;
+      const season =
+        month >= 3 && month <= 5
+          ? "봄"
+          : month >= 6 && month <= 8
+          ? "여름"
+          : month >= 9 && month <= 11
+          ? "가을"
+          : "겨울";
+
       return {
-        title: "긴급 연락처",
-        content:
-          "응급상황 시 112(경찰), 119(소방/구급), 1366(여성 긴급전화)로 연락하세요. 위험을 느끼면 주변 사람들에게 도움을 요청하고, 밝은 곳으로 이동하세요.",
+        title: `${season} 안전사고 주의보`,
+        content: `${season}철에는 계절 특성에 따른 안전사고가 증가합니다.\n\n주요 주의사항:\n- 밤길 보행 시 밝은 곳으로 이동\n- 낯선 사람 접근 시 주변에 도움 요청\n- 응급상황 시 112(경찰), 119(소방/구급) 신고\n- 친구나 가족과 위치 공유 활성화\n\n항상 주변을 살피고 안전하게 이동하세요.`,
       };
     }
   }
